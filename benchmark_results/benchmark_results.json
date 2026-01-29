@@ -1,0 +1,173 @@
+{
+  "device": "cuda",
+  "cuda_available": true,
+  "triton_available": false,
+  "config": {
+    "hidden_size": 512,
+    "num_layers": 12,
+    "num_heads": 8
+  },
+  "kernel_results": {
+    "fused_entropy_decision_ms": 26.638944999995147,
+    "token_router_split_ms": 0.2952180000102089
+  },
+  "model_results": [
+    {
+      "strategy": "baseline",
+      "batch_size": 1,
+      "seq_length": 64,
+      "latency_ms": 9.687,
+      "latency_std": 2.126,
+      "throughput_tokens_per_sec": 6607.1,
+      "memory_mb": 2491.0,
+      "peak_memory_mb": 2492.0,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "safe",
+      "batch_size": 1,
+      "seq_length": 64,
+      "latency_ms": 12.052,
+      "latency_std": 1.804,
+      "throughput_tokens_per_sec": 5310.2,
+      "memory_mb": 2491.0,
+      "peak_memory_mb": 2492.0,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "fast",
+      "batch_size": 1,
+      "seq_length": 64,
+      "latency_ms": 12.701,
+      "latency_std": 2.622,
+      "throughput_tokens_per_sec": 5039.2,
+      "memory_mb": 2491.1,
+      "peak_memory_mb": 2492.1,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "baseline",
+      "batch_size": 1,
+      "seq_length": 256,
+      "latency_ms": 13.894,
+      "latency_std": 0.79,
+      "throughput_tokens_per_sec": 18424.8,
+      "memory_mb": 2750.5,
+      "peak_memory_mb": 2751.7,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "safe",
+      "batch_size": 1,
+      "seq_length": 256,
+      "latency_ms": 17.811,
+      "latency_std": 1.739,
+      "throughput_tokens_per_sec": 14373.4,
+      "memory_mb": 2750.4,
+      "peak_memory_mb": 2751.6,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "fast",
+      "batch_size": 1,
+      "seq_length": 256,
+      "latency_ms": 18.922,
+      "latency_std": 3.07,
+      "throughput_tokens_per_sec": 13529.4,
+      "memory_mb": 2750.7,
+      "peak_memory_mb": 2752.0,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "baseline",
+      "batch_size": 4,
+      "seq_length": 64,
+      "latency_ms": 12.686,
+      "latency_std": 1.274,
+      "throughput_tokens_per_sec": 20179.5,
+      "memory_mb": 2734.7,
+      "peak_memory_mb": 2735.8,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "safe",
+      "batch_size": 4,
+      "seq_length": 64,
+      "latency_ms": 18.808,
+      "latency_std": 2.52,
+      "throughput_tokens_per_sec": 13611.2,
+      "memory_mb": 2734.2,
+      "peak_memory_mb": 2735.3,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "fast",
+      "batch_size": 4,
+      "seq_length": 64,
+      "latency_ms": 18.404,
+      "latency_std": 2.229,
+      "throughput_tokens_per_sec": 13910.3,
+      "memory_mb": 2734.2,
+      "peak_memory_mb": 2735.3,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "baseline",
+      "batch_size": 4,
+      "seq_length": 256,
+      "latency_ms": 53.103,
+      "latency_std": 1.194,
+      "throughput_tokens_per_sec": 19283.3,
+      "memory_mb": 3760.4,
+      "peak_memory_mb": 3763.4,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "safe",
+      "batch_size": 4,
+      "seq_length": 256,
+      "latency_ms": 57.502,
+      "latency_std": 3.275,
+      "throughput_tokens_per_sec": 17808.1,
+      "memory_mb": 3759.9,
+      "peak_memory_mb": 3762.9,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    },
+    {
+      "strategy": "fast",
+      "batch_size": 4,
+      "seq_length": 256,
+      "latency_ms": 54.203,
+      "latency_std": 4.523,
+      "throughput_tokens_per_sec": 18891.9,
+      "memory_mb": 3761.4,
+      "peak_memory_mb": 3764.4,
+      "skip_ratio": 0.0,
+      "computed_layers": 12,
+      "accuracy_retention": 1.0
+    }
+  ],
+  "accuracy_retention": 0.6640145778656006
+}

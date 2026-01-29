@@ -1,0 +1,94 @@
+# SEDAC V9.0 Production Configuration
+# 生产环境配置文件
+
+# 模型配置
+model:
+  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  hidden_size: 3584
+  num_attention_heads: 28
+  num_key_value_heads: 4
+  num_hidden_layers: 28
+  intermediate_size: 18944
+  vocab_size: 152064
+  max_position_embeddings: 32768
+  head_dim: 128
+
+# SEDAC 核心配置
+# ⚠️ 注意: 以下阈值参数会被 AutoCalibrator 自动校准覆盖
+# 启用 auto_calibrate: true 后，系统会根据模型输出分布自动学习最优阈值
+sedac:
+  # === 自适应校准 ===
+  auto_calibrate: true  # 启用后，下方阈值会被自动覆盖
+  calibration_samples: 100  # 校准所需样本数
+  calibration_file: null  # 加载已保存的校准参数 (可选)
+  
+  # === 熵阈值 (自动校准目标) ===
+  # 初始值，会根据模型输出熵分布的 P20/P50/P80 自动调整
+  entropy_threshold_base: 0.5  # → 自动调整为 P50
+  entropy_threshold_min: 0.2   # → 自动调整为 P20
+  entropy_threshold_max: 0.9   # → 自动调整为 P80
+  
+  # === 早退配置 (自动校准目标) ===
+  # 根据低熵样本的退出层分布自动确定
+  min_exit_layer: 4      # → 自动调整为低熵样本 P10
+  max_skip_layers: 8     # → 自动调整为 (total_layers - avg_exit)
+  exit_confidence_threshold: 0.85  # → 自动调整为 P70
+  
+  # === 在线自适应阈值 ===
+  adaptive_threshold: true
+  threshold_ema_decay: 0.99
+  threshold_warmup_steps: 100
+  
+  # === Ghost KV ===
+  enable_ghost_kv: true
+  ghost_kv_similarity_target: 0.98
+  ghost_kv_mlp_hidden_mult: 0.25
+  
+  # === O1 推理 (自动校准目标) ===
+  enable_o1_reasoning: true
+  o1_high_entropy_threshold: 4.5  # → 自动调整为 P90
+  o1_max_thinking_steps: 8
+  o1_confidence_target: 0.9
+  
+  # === Token 路由 ===
+  enable_token_routing: true
+  routing_batch_threshold: 4
+
+# 性能优化配置
+performance:
+  # 内核选择: cuda_cpp, triton, pytorch, tensorrt
+  kernel_backend: "cuda_cpp"
+  
+  # CUDA 优化
+  use_cuda_graphs: true
+  cuda_graph_warmup_iters: 3
+  enable_flash_attention: true
+  
+  # 内存优化
+  enable_kv_cache_quantization: false
+  kv_cache_dtype: "float16"
+  max_kv_cache_length: 32768
+  
+  # 批处理
+  max_batch_size: 64
+  dynamic_batching: true
+  batch_timeout_ms: 5.0
+  
+  # 并行
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+
+# 部署配置
+deployment_mode: "single_gpu"  # single_gpu, multi_gpu, tensor_parallel, pipeline_parallel
+precision: "fp16"  # fp32, fp16, bf16, int8, int4
+device: "cuda:0"
+
+# 监控配置
+enable_metrics: true
+metrics_port: 9090
+log_level: "INFO"
+enable_profiling: false
+
+# 检查点
+checkpoint_dir: "./checkpoints"
+save_interval_steps: 1000
