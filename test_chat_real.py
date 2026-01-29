@@ -63,12 +63,20 @@ class SEDACChatTester:
         else:  # 中熵 - 正常
             return 'NORM', self.total_layers
     
-    def format_prompt(self, user_input):
-        """使用Qwen chat模板格式化prompt"""
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant. Answer concisely."},
-            {"role": "user", "content": user_input}
-        ]
+    def format_prompt(self, user_input, use_history=True):
+        """使用Qwen chat模板格式化prompt，支持多轮对话"""
+        if use_history:
+            # 添加新用户消息到历史
+            self.messages.append({"role": "user", "content": user_input})
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant. Remember the conversation context."}
+            ] + self.messages
+        else:
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_input}
+            ]
+        
         # 使用tokenizer的chat模板
         text = self.tokenizer.apply_chat_template(
             messages, 
@@ -76,6 +84,15 @@ class SEDACChatTester:
             add_generation_prompt=True
         )
         return text
+    
+    def add_assistant_response(self, response):
+        """将助手回复添加到历史"""
+        self.messages.append({"role": "assistant", "content": response})
+    
+    def clear_history(self):
+        """清除对话历史"""
+        self.messages = []
+        print("[对话历史已清除]")
     
     @torch.no_grad()
     def generate_with_sedac(self, prompt, max_tokens=50):
@@ -175,12 +192,16 @@ class SEDACChatTester:
             print(f'  O1 Threshold: {params.o1_high_entropy_threshold:.2f}')
     
     def chat(self, prompt):
-        """单轮对话"""
+        """多轮对话 - 维护上下文历史"""
         print(f'\n{"="*60}')
         print(f'User: {prompt}')
+        print(f'[History: {len(self.messages)} messages]')
         print('='*60)
         
         response, stats = self.generate_with_sedac(prompt)
+        
+        # 保存助手回复到历史
+        self.add_assistant_response(response)
         
         print('-' * 60)
         print(f'Response: {response}')
@@ -213,7 +234,8 @@ def main():
     tester.print_stats()
     
     print('\n' + '=' * 60)
-    print('Interactive Mode - Type your message (or "quit" to exit)')
+    print('Interactive Mode (Multi-turn with Context Memory)')
+    print('Commands: quit, stats, clear (clear history)')
     print('=' * 60)
     
     while True:
@@ -223,6 +245,9 @@ def main():
                 break
             if user_input.lower() == 'stats':
                 tester.print_stats()
+                continue
+            if user_input.lower() == 'clear':
+                tester.clear_history()
                 continue
             if not user_input:
                 continue
