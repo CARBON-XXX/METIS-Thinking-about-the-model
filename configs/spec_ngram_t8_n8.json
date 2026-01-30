@@ -1,7 +1,0 @@
-{
-  "method": "ngram",
-  "num_speculative_tokens": 8,
-  "prompt_lookup_min": 8,
-  "prompt_lookup_max": 8
-}
-

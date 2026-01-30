@@ -1,1 +1,0 @@
-# SEDAC Analysis Scripts
