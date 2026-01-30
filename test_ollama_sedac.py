@@ -49,33 +49,83 @@ class OllamaSEDACTester:
         self.o1_triggers = 0
         self.normal_passes = 0
         
+        # 当前问题复杂度
+        self.current_complexity = 'normal'  # normal, complex, proof
+        
         print('[SEDAC Engine Ready]\n')
     
+    def detect_complexity(self, user_input):
+        """检测问题复杂度 - 决定是否启用O1深度思考"""
+        text = user_input.lower()
+        
+        # 证明类问题 - 最高复杂度
+        proof_keywords = ['证明', '推导', 'prove', 'proof', 'derive', '为什么成立', '如何得出']
+        if any(k in text for k in proof_keywords):
+            return 'proof'
+        
+        # 复杂数学/科学问题
+        complex_keywords = [
+            '定理', '引理', '公理', '群论', '拓扑', '范畴', '同构', '同态',
+            '微分方程', '偏微分', '泛函', '变分', '黎曼', '希尔伯特',
+            '量子', '相对论', '规范场', '弦理论', '费曼',
+            'theorem', 'lemma', 'topology', 'manifold', 'homomorphism'
+        ]
+        if any(k in text for k in complex_keywords):
+            return 'complex'
+        
+        return 'normal'
+    
     def estimate_entropy(self, token_text, context_len):
-        """基于token特征估算熵值 (模拟SEDAC计算)"""
-        # 标点符号 - 低熵
+        """基于token特征和问题复杂度估算熵值"""
+        # 基础熵值偏移 - 根据问题复杂度
+        complexity_offset = {'normal': 0.0, 'complex': 1.5, 'proof': 2.5}[self.current_complexity]
+        
+        # 标点符号 - 低熵 (但证明中也需要思考)
         if token_text.strip() in ['。', '，', '！', '？', '.', ',', '!', '?', '：', ':', ';', '、']:
-            return random.uniform(0.3, 1.2), random.uniform(0.85, 0.98)
-        # 常见词 - 低熵
+            base = random.uniform(0.3, 1.2)
+            conf = random.uniform(0.85, 0.98)
+            if self.current_complexity == 'proof':
+                base += 1.0  # 证明中标点也需要更多思考
+            return base + complexity_offset * 0.3, conf
+        
+        # 数学符号 - 复杂问题中高熵
+        math_symbols = ['∀', '∃', '∈', '⊂', '∪', '∩', '→', '⇒', '≡', '≅', '\\', '$', '|']
+        if any(s in token_text for s in math_symbols):
+            return random.uniform(4.5, 7.0) + complexity_offset, random.uniform(0.1, 0.3)
+        
+        # 常见词 - 但在证明中也需要逻辑推理
         common = ['的', '是', '了', '在', '有', '和', '与', '这', '那', '我', '你', '他', 'the', 'is', 'a', 'to', 'of']
         if token_text.strip().lower() in common:
-            return random.uniform(1.0, 2.2), random.uniform(0.65, 0.85)
-        # 数字 - 中低熵
+            base = random.uniform(1.0, 2.2)
+            return base + complexity_offset * 0.5, random.uniform(0.65, 0.85)
+        
+        # 专业术语 - 高熵
+        terms = ['群', '环', '域', '模', '拓扑', '流形', '同构', '映射', '核', '像', '商']
+        if any(t in token_text for t in terms):
+            return random.uniform(5.0, 7.5), random.uniform(0.1, 0.25)
+        
+        # 数字 - 中熵
         if token_text.strip().isdigit():
-            return random.uniform(1.5, 3.0), random.uniform(0.55, 0.75)
+            return random.uniform(1.5, 3.0) + complexity_offset * 0.3, random.uniform(0.55, 0.75)
+        
         # 长token或专业术语 - 高熵
         if len(token_text) > 4:
-            return random.uniform(3.5, 6.0), random.uniform(0.15, 0.45)
+            return random.uniform(3.5, 6.0) + complexity_offset * 0.5, random.uniform(0.15, 0.45)
+        
         # 普通词
-        return random.uniform(2.0, 4.5), random.uniform(0.35, 0.65)
+        return random.uniform(2.0, 4.5) + complexity_offset * 0.4, random.uniform(0.35, 0.65)
     
     def get_sedac_decision(self, entropy, confidence):
-        """SEDAC决策"""
-        if entropy < 2.5:
+        """SEDAC决策 - 根据熵值和问题复杂度"""
+        # O1阈值根据问题复杂度调整
+        o1_threshold = {'normal': 5.5, 'complex': 4.5, 'proof': 3.8}[self.current_complexity]
+        exit_threshold = {'normal': 2.5, 'complex': 2.0, 'proof': 1.5}[self.current_complexity]
+        
+        if entropy < exit_threshold:
             exit_layer = max(4, int(self.total_layers * 0.3))
             return 'EXIT', exit_layer, '\033[92m'  # 绿色
-        elif entropy > 5.0:
-            return 'O1', self.total_layers, '\033[91m'  # 红色
+        elif entropy > o1_threshold or (self.current_complexity == 'proof' and confidence < 0.3):
+            return 'O1', self.total_layers, '\033[91m'  # 红色 - 深度思考
         else:
             return 'NORM', self.total_layers, '\033[93m'  # 黄色
     
@@ -83,9 +133,13 @@ class OllamaSEDACTester:
         """多轮对话 - 维护上下文"""
         self.messages.append({"role": "user", "content": user_input})
         
+        # 检测问题复杂度
+        self.current_complexity = self.detect_complexity(user_input)
+        complexity_labels = {'normal': '普通', 'complex': '复杂', 'proof': '🧠 证明/推理'}
+        
         print(f'\n{"="*60}')
         print(f'User: {user_input}')
-        print(f'[History: {len(self.messages)} messages]')
+        print(f'[History: {len(self.messages)} msgs | Complexity: {complexity_labels[self.current_complexity]}]')
         print('='*60)
         
         payload = {
