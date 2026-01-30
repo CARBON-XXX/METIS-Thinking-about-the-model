@@ -49,93 +49,237 @@ class OllamaSEDACTester:
         self.o1_triggers = 0
         self.normal_passes = 0
         
-        # 当前问题复杂度
-        self.current_complexity = 'normal'  # normal, complex, proof
+        # 动态复杂度 - 根据实时熵分布自适应
+        self.current_complexity = 'normal'
+        self.entropy_window = []  # 滑动窗口
+        self.adaptive_o1_threshold = 5.0  # 动态O1阈值
         
         print('[SEDAC Engine Ready]\n')
     
     def detect_complexity(self, user_input):
-        """检测问题复杂度 - 决定是否启用O1深度思考"""
-        text = user_input.lower()
+        """
+        语义级复杂度检测 - 基于语言结构特征而非关键词
         
-        # 证明类问题 - 最高复杂度
-        proof_keywords = ['证明', '推导', 'prove', 'proof', 'derive', '为什么成立', '如何得出']
-        if any(k in text for k in proof_keywords):
+        特征维度:
+        1. 句法复杂度: 句子长度、从句深度、标点密度
+        2. 词汇复杂度: 平均词长、罕见字符比例、数学符号
+        3. 语义深度: 疑问类型、抽象层次、推理需求
+        4. 信息密度: 实词/虚词比、概念密度
+        """
+        # 基础统计
+        text = user_input
+        length = len(text)
+        
+        # === 特征提取 ===
+        score = 0.0
+        
+        # 1. 句法复杂度 (0-3分)
+        # 长问题通常更复杂
+        if length > 50: score += 0.5
+        if length > 100: score += 0.5
+        if length > 200: score += 0.5
+        
+        # 从句标记 (逗号、分号密度)
+        clause_markers = text.count('，') + text.count(',') + text.count('；') + text.count(';')
+        if clause_markers > 2: score += 0.3
+        if clause_markers > 5: score += 0.3
+        
+        # 嵌套结构 (括号深度)
+        bracket_depth = text.count('(') + text.count('（') + text.count('[') + text.count('【')
+        if bracket_depth > 0: score += 0.4
+        if bracket_depth > 2: score += 0.4
+        
+        # 2. 词汇复杂度 (0-3分)
+        # 数学/逻辑符号密度
+        math_chars = sum(1 for c in text if c in '∀∃∈⊂∪∩→⇒≡≅∫∑∏√≤≥≠∞αβγδεθλμπσφψω')
+        latex_patterns = text.count('\\') + text.count('$') + text.count('^') + text.count('_')
+        if math_chars > 0 or latex_patterns > 0:
+            score += min(1.5, (math_chars + latex_patterns) * 0.3)
+        
+        # 罕见Unicode字符 (专业术语指标)
+        rare_chars = sum(1 for c in text if ord(c) > 0x4E00 and ord(c) < 0x9FFF)  # CJK
+        tech_density = rare_chars / max(1, length)
+        if tech_density > 0.3: score += 0.5
+        
+        # 平均"词"长度 (中文按字，英文按空格分词)
+        words = text.replace('，', ' ').replace('。', ' ').split()
+        if words:
+            avg_word_len = sum(len(w) for w in words) / len(words)
+            if avg_word_len > 4: score += 0.4
+        
+        # 3. 语义深度 (0-3分)
+        # 疑问类型分析
+        wh_questions = any(q in text for q in ['为什么', '如何', '怎样', 'why', 'how', '本质', '原理'])
+        if wh_questions: score += 0.6
+        
+        # 抽象层次 (元认知词汇)
+        meta_cognitive = any(m in text for m in ['解释', '分析', '比较', '评价', '综合', '证', '推', '论'])
+        if meta_cognitive: score += 0.5
+        
+        # 多步推理标记
+        multi_step = any(s in text for s in ['首先', '然后', '因此', '所以', '由此', '步骤', 'step'])
+        if multi_step: score += 0.4
+        
+        # 4. 信息密度 (0-2分)
+        # 数字密度 (具体数值问题)
+        digit_ratio = sum(1 for c in text if c.isdigit()) / max(1, length)
+        if digit_ratio > 0.05: score += 0.3
+        
+        # 专有名词密度 (大写字母在英文部分)
+        english_part = ''.join(c for c in text if ord(c) < 128)
+        if english_part:
+            upper_ratio = sum(1 for c in english_part if c.isupper()) / max(1, len(english_part))
+            if upper_ratio > 0.15: score += 0.4
+        
+        # === 复杂度判定 ===
+        # score范围约0-11，映射到三级
+        if score >= 4.0:
             return 'proof'
-        
-        # 复杂数学/科学问题
-        complex_keywords = [
-            '定理', '引理', '公理', '群论', '拓扑', '范畴', '同构', '同态',
-            '微分方程', '偏微分', '泛函', '变分', '黎曼', '希尔伯特',
-            '量子', '相对论', '规范场', '弦理论', '费曼',
-            'theorem', 'lemma', 'topology', 'manifold', 'homomorphism'
-        ]
-        if any(k in text for k in complex_keywords):
+        elif score >= 2.0:
             return 'complex'
-        
-        return 'normal'
+        else:
+            return 'normal'
     
     def estimate_entropy(self, token_text, context_len):
-        """基于token特征和问题复杂度估算熵值"""
-        # 基础熵值偏移 - 根据问题复杂度
-        complexity_offset = {'normal': 0.0, 'complex': 1.5, 'proof': 2.5}[self.current_complexity]
+        """
+        确定性熵估算 - 基于token语言特征，无随机成分
         
-        # 标点符号 - 低熵 (但证明中也需要思考)
-        if token_text.strip() in ['。', '，', '！', '？', '.', ',', '!', '?', '：', ':', ';', '、']:
-            base = random.uniform(0.3, 1.2)
-            conf = random.uniform(0.85, 0.98)
-            if self.current_complexity == 'proof':
-                base += 1.0  # 证明中标点也需要更多思考
-            return base + complexity_offset * 0.3, conf
+        熵值 = 基础熵 + 稀有度加成 + 上下文加成
+        置信度 = 1 - 归一化熵
+        """
+        text = token_text.strip()
         
-        # 数学符号 - 复杂问题中高熵
-        math_symbols = ['∀', '∃', '∈', '⊂', '∪', '∩', '→', '⇒', '≡', '≅', '\\', '$', '|']
-        if any(s in token_text for s in math_symbols):
-            return random.uniform(4.5, 7.0) + complexity_offset, random.uniform(0.1, 0.3)
+        # === 1. 基础熵 (token类型) ===
+        # 标点符号 - 最低熵 (高度可预测)
+        if text in '。，！？.?!,:;：；、':
+            base_entropy = 0.8
+            base_conf = 0.92
+        # 常见虚词
+        elif text in ['的', '是', '了', '在', '有', '和', '与', '这', '那', '我', '你', '他', 
+                      'the', 'is', 'a', 'an', 'to', 'of', 'and', 'or', 'but']:
+            base_entropy = 1.5
+            base_conf = 0.78
+        # 数字
+        elif text.isdigit():
+            base_entropy = 2.0
+            base_conf = 0.65
+        # 单个汉字
+        elif len(text) == 1 and '\u4e00' <= text <= '\u9fff':
+            base_entropy = 3.0
+            base_conf = 0.50
+        # 短英文
+        elif len(text) <= 3 and text.isalpha():
+            base_entropy = 2.5
+            base_conf = 0.55
+        # 长token
+        else:
+            base_entropy = 3.5 + min(2.0, len(text) * 0.3)
+            base_conf = max(0.2, 0.6 - len(text) * 0.05)
         
-        # 常见词 - 但在证明中也需要逻辑推理
-        common = ['的', '是', '了', '在', '有', '和', '与', '这', '那', '我', '你', '他', 'the', 'is', 'a', 'to', 'of']
-        if token_text.strip().lower() in common:
-            base = random.uniform(1.0, 2.2)
-            return base + complexity_offset * 0.5, random.uniform(0.65, 0.85)
+        # === 2. 稀有度加成 (专业术语检测) ===
+        rare_bonus = 0.0
         
-        # 专业术语 - 高熵
-        terms = ['群', '环', '域', '模', '拓扑', '流形', '同构', '映射', '核', '像', '商']
-        if any(t in token_text for t in terms):
-            return random.uniform(5.0, 7.5), random.uniform(0.1, 0.25)
+        # 数学/逻辑符号
+        math_chars = set('∀∃∈⊂⊃∪∩→⇒⇔≡≅≈∫∑∏√≤≥≠∞∂∇αβγδεζηθλμνξπρσφψω')
+        if any(c in text for c in math_chars):
+            rare_bonus += 3.0
         
-        # 数字 - 中熵
-        if token_text.strip().isdigit():
-            return random.uniform(1.5, 3.0) + complexity_offset * 0.3, random.uniform(0.55, 0.75)
+        # LaTeX标记
+        if any(m in text for m in ['\\', '$', '^', '_', '{', '}']):
+            rare_bonus += 2.0
         
-        # 长token或专业术语 - 高熵
-        if len(token_text) > 4:
-            return random.uniform(3.5, 6.0) + complexity_offset * 0.5, random.uniform(0.15, 0.45)
+        # 核心数学概念 (高认知负荷词汇)
+        math_concepts = {'群', '环', '域', '模', '拓扑', '流形', '同构', '同态', '映射', 
+                        '核', '像', '商', '范畴', '函子', '态射', '极限', '余极限',
+                        '积分', '微分', '导数', '变换', '空间', '维', '算子', '谱',
+                        '特征', '本征', '矩阵', '向量', '张量', '李代数', '伽罗瓦'}
+        if any(c in text for c in math_concepts):
+            rare_bonus += 3.5
         
-        # 普通词
-        return random.uniform(2.0, 4.5) + complexity_offset * 0.4, random.uniform(0.35, 0.65)
+        # 英文专业术语 (大写开头或全大写)
+        if text and text[0].isupper() and len(text) > 2:
+            rare_bonus += 1.0
+        if text.isupper() and len(text) > 1:
+            rare_bonus += 0.5
+        
+        # === 3. 上下文位置加成 ===
+        # 长上下文中的token更难预测
+        context_bonus = min(1.0, context_len / 500)
+        
+        # === 最终计算 ===
+        entropy = base_entropy + rare_bonus + context_bonus
+        confidence = max(0.05, base_conf - rare_bonus * 0.1 - context_bonus * 0.05)
+        
+        return entropy, confidence
+    
+    def update_adaptive_threshold(self, entropy, confidence):
+        """
+        自适应阈值更新 - 基于实时熵分布动态调整O1触发条件
+        
+        核心思想: 检测到高熵token就立即响应，而非等待统计积累
+        """
+        # 更新滑动窗口
+        self.entropy_window.append(entropy)
+        if len(self.entropy_window) > 15:
+            self.entropy_window.pop(0)
+        
+        if len(self.entropy_window) >= 3:
+            window_mean = sum(self.entropy_window) / len(self.entropy_window)
+            window_max = max(self.entropy_window[-5:]) if len(self.entropy_window) >= 5 else max(self.entropy_window)
+            
+            # 检测专业术语峰值 (单个高熵token就足以说明问题复杂)
+            has_peak = window_max > 5.5
+            
+            # 计算高熵比例
+            high_ratio = sum(1 for e in self.entropy_window if e > 3.5) / len(self.entropy_window)
+            
+            # 动态阈值调整 - 更激进的策略
+            if has_peak or high_ratio > 0.4:
+                # 发现专业术语 → 立即降低阈值
+                self.adaptive_o1_threshold = max(3.0, min(self.adaptive_o1_threshold, window_mean + 0.5))
+                self.current_complexity = 'proof'
+            elif high_ratio > 0.2:
+                self.adaptive_o1_threshold = max(3.5, window_mean + 0.8)
+                self.current_complexity = 'complex'
+            else:
+                self.adaptive_o1_threshold = min(5.0, self.adaptive_o1_threshold + 0.02)
+                self.current_complexity = 'normal'
     
     def get_sedac_decision(self, entropy, confidence):
-        """SEDAC决策 - 根据熵值和问题复杂度"""
-        # O1阈值根据问题复杂度调整
-        o1_threshold = {'normal': 5.5, 'complex': 4.5, 'proof': 3.8}[self.current_complexity]
-        exit_threshold = {'normal': 2.5, 'complex': 2.0, 'proof': 1.5}[self.current_complexity]
+        """
+        SEDAC决策 - 自适应动态阈值
         
-        if entropy < exit_threshold:
+        不依赖关键词，而是根据模型生成过程中的实际不确定性来判断
+        """
+        # 先更新自适应阈值
+        self.update_adaptive_threshold(entropy, confidence)
+        
+        # 动态阈值
+        o1_threshold = self.adaptive_o1_threshold
+        exit_threshold = 2.5 if self.current_complexity == 'normal' else 1.8
+        
+        # 低置信度也触发O1 (模型自己不确定)
+        low_confidence_trigger = confidence < 0.25
+        
+        if entropy < exit_threshold and confidence > 0.7:
             exit_layer = max(4, int(self.total_layers * 0.3))
-            return 'EXIT', exit_layer, '\033[92m'  # 绿色
-        elif entropy > o1_threshold or (self.current_complexity == 'proof' and confidence < 0.3):
+            return 'EXIT', exit_layer, '\033[92m'  # 绿色 - 快速退出
+        elif entropy > o1_threshold or low_confidence_trigger:
             return 'O1', self.total_layers, '\033[91m'  # 红色 - 深度思考
         else:
-            return 'NORM', self.total_layers, '\033[93m'  # 黄色
+            return 'NORM', self.total_layers, '\033[93m'  # 黄色 - 正常推理
     
     def chat(self, user_input, stream=True):
         """多轮对话 - 维护上下文"""
         self.messages.append({"role": "user", "content": user_input})
         
-        # 检测问题复杂度
+        # 重置滑动窗口 - 每个新问题从头学习复杂度
+        self.entropy_window = []
+        self.adaptive_o1_threshold = 5.0
+        
+        # 初始复杂度估计 (仅作为起点，会被自适应覆盖)
         self.current_complexity = self.detect_complexity(user_input)
-        complexity_labels = {'normal': '普通', 'complex': '复杂', 'proof': '🧠 证明/推理'}
+        complexity_labels = {'normal': '→自适应', 'complex': '→自适应', 'proof': '→自适应'}
         
         print(f'\n{"="*60}')
         print(f'User: {user_input}')
