@@ -205,95 +205,47 @@ class MetisInference:
             signal = self._metis.step(logits)
             signals.append(signal)
 
-            # --- G3: Dynamic CoT Injection (CoTManager-driven) ---
-            # CoTManager selects the most appropriate strategy based on signal characteristics:
-            #   REFLECTION -> model oscillating at knowledge boundary
-            #   DECOMPOSITION -> sustained deep reasoning, complex problem
-            #   CLARIFICATION -> conceptual ambiguity, high semantic diversity
-            #   STANDARD -> generic high entropy
-            # Also manages cooldown and injection count limits to prevent runaway latency
+            # --- G3: Dynamic Thinking Trigger ---
+            # When sustained uncertainty is detected, open a <thinking> block
+            # and let the model reason freely. NO template injection —
+            # the model generates its own genuine reasoning.
             self._cot_manager.observe(signal)
 
-            if self._cot_manager.should_inject():
+            if self._cot_manager.should_inject() and not is_thinking:
                 strategy = self._cot_manager.select_strategy(signal)
-                gen_context = tokenizer.decode(generated_tokens[-30:], skip_special_tokens=True) if generated_tokens else ""
-                cot_text = self._cot_manager.get_prompt(strategy, context=gen_context, z_score=signal.z_score)
-                
-                # Dynamic Thinking: if not currently in a thinking block, open one
-                if not is_thinking:
-                    think_open = "\n<thinking>\n"
-                    think_open_ids = tokenizer.encode(think_open, add_special_tokens=False)
-                    for tid in think_open_ids:
-                        generated_tokens.append(tid)
-                    if self._on_token is not None:
-                        open_signal = CognitiveSignal(decision=Decision.DEEP, introspection="[Thinking Start]")
-                        self._on_token(think_open, open_signal)
-                    # Feed into model
-                    open_input = torch.tensor([think_open_ids], device=model.device)
-                    open_out = model(
-                        input_ids=open_input,
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                        return_dict=True,
+
+                # Open <thinking> tag — model continues from here on its own
+                think_open = "\n<thinking>\n"
+                think_open_ids = tokenizer.encode(think_open, add_special_tokens=False)
+                for tid in think_open_ids:
+                    generated_tokens.append(tid)
+                if self._on_token is not None:
+                    open_signal = CognitiveSignal(
+                        decision=Decision.DEEP,
+                        introspection=f"[Thinking: {strategy.value}]",
                     )
-                    past_key_values = open_out.past_key_values
-                    logits = open_out.logits[:, -1, :]
-                    
-                    is_thinking = True
-                    thinking_start_step = step
-                    logger.info(f"[METIS] Dynamic Thinking: Opening block for CoT: {strategy.value}")
-                else:
-                    # Already thinking, reset budget to extend reasoning
-                    thinking_start_step = step
-                    logger.info(f"[METIS] Dynamic Thinking: Extending budget for CoT: {strategy.value}")
-                
-                self._cot_manager.record_injection(strategy)
-                cot_injected = True
-                cot_strategies_used.append(strategy)
+                    self._on_token(think_open, open_signal)
 
-                cot_ids = tokenizer.encode(cot_text, add_special_tokens=False)
-                
-                # Pre-calculate signal for CoT tokens
-                cot_signal = CognitiveSignal(
-                    semantic_entropy=signal.semantic_entropy,
-                    confidence=signal.confidence,
-                    decision=Decision.DEEP,
-                    boundary_action=BoundaryAction.GENERATE,
-                    introspection=f"[CoT {strategy.value}]",
-                    z_score=signal.z_score,
-                )
-
-                for cid in cot_ids:
-                    generated_tokens.append(cid)
-                    # Stream individual tokens for organic UX
-                    if self._on_token is not None:
-                        token_text = tokenizer.decode([cid], skip_special_tokens=True)
-                        try:
-                            # CoT injection displayed directly, not buffered (system-forced)
-                            self._on_token(token_text, cot_signal)
-                            time.sleep(0.02)
-                        except Exception:
-                            pass
-                
-                # Feed CoT tokens into model to update KV cache
-                cot_input = torch.tensor([cot_ids], device=model.device)
-                cot_out = model(
-                    input_ids=cot_input,
+                # Feed <thinking> tag into model — it will generate real reasoning
+                open_input = torch.tensor([think_open_ids], device=model.device)
+                open_out = model(
+                    input_ids=open_input,
                     past_key_values=past_key_values,
                     use_cache=True,
                     return_dict=True,
                 )
-                past_key_values = cot_out.past_key_values
-                
-                # CRITICAL FIX: Update logits!
-                # After CoT injection, the next token should be predicted based on the last CoT token,
-                # not the original logits before injection. Otherwise CoT has no effect on the current decision.
-                logits = cot_out.logits[:, -1, :]
-                
+                past_key_values = open_out.past_key_values
+                logits = open_out.logits[:, -1, :]
+
+                is_thinking = True
+                thinking_start_step = step
+                self._cot_manager.record_injection(strategy)
+                cot_injected = True
+                cot_strategies_used.append(strategy)
+
                 logger.info(
-                    f"[METIS] CoT injected at step {step}: "
-                    f"strategy={strategy.value}, "
-                    f"injection #{len(cot_strategies_used)}"
+                    f"[METIS] Thinking triggered at step {step}: "
+                    f"reason={strategy.value}, z={signal.z_score:.2f}"
                 )
 
             # --- Boundary guard action execution ---
@@ -348,22 +300,24 @@ class MetisInference:
                 logits, signal, temperature, top_p
             )
             
-            # --- Anti-Lazy Thinking: enforce deep reasoning ---
+            # --- Anti-Lazy Thinking: enforce minimum reasoning depth ---
+            # If model tries to close <thinking> too early, suppress the closing
+            # tag and let the model continue reasoning naturally.
+            # NO injected text — just token suppression + re-sample.
             if is_thinking:
-                # Check if model is trying to close the thinking block
-                # Only decode last few tokens to check for closing tag
                 check_window = 12
                 recent_ids = generated_tokens[-check_window:] + [next_token_id]
                 recent_text = tokenizer.decode(recent_ids, skip_special_tokens=True)
-                
+
                 if "</thinking>" in recent_text:
                     tokens_in_block = step - thinking_start_step
                     if tokens_in_block < min_thinking_tokens:
-                        logger.info(f"[METIS] Anti-Lazy: Rejected premature closing at {tokens_in_block} tokens")
-                        
-                        # 1. Rollback: Remove ALL closing tag tokens from generated_tokens
-                        # The tag '</thinking>' may span multiple tokens (e.g., '</', 'thinking', '>')
-                        # next_token_id hasn't been appended yet, so we only clean generated_tokens
+                        logger.info(
+                            f"[METIS] Anti-Lazy: Suppressed premature </thinking> "
+                            f"at {tokens_in_block}/{min_thinking_tokens} tokens"
+                        )
+
+                        # 1. Rollback: Remove closing tag partial tokens
                         _closing_partials = [
                             "</thinking>", "</thinking", "</thinkin", "</thinki",
                             "</think", "</thin", "</thi", "</th", "</t", "</",
@@ -374,62 +328,38 @@ class MetisInference:
                                 generated_tokens.pop()
                             else:
                                 break
-                        
-                        # 2. Clear Visualizer Buffer (Hide the rejected tag)
+
+                        # 2. Clear visualizer buffer (hide rejected tag)
                         vis_buffer.clear()
 
-                        # 3. Inject Continuation
-                        continuations = [
-                            "Wait, I should double check that calculation. ",
-                            "Specifically, I need to verify ",
-                            "Furthermore, considering the edge cases, ",
-                            "Let me re-evaluate the previous step. ",
-                        ]
-                        import random
-                        continuation = continuations[step % len(continuations)]
-                        cont_ids = tokenizer.encode(continuation, add_special_tokens=False)
-                        
-                        # Inject continuation tokens
-                        cont_input = torch.tensor([cont_ids], device=model.device)
-                        cont_out = model(
-                            input_ids=cont_input,
-                            past_key_values=past_key_values, # Dirty KV but okay
-                            use_cache=True,
-                            return_dict=True,
+                        # 3. Re-sample from current logits with </thinking> suppressed
+                        # Mask the closing tag's first token to prevent re-generation
+                        close_tag_ids = tokenizer.encode("</thinking>", add_special_tokens=False)
+                        if close_tag_ids:
+                            logits[0, close_tag_ids[0]] = float('-inf')
+
+                        # Re-sample — model will naturally continue its reasoning
+                        next_token_id = self._cognitive_sample(
+                            logits, signal, temperature, top_p
                         )
-                        past_key_values = cont_out.past_key_values
-                        logits = cont_out.logits[:, -1, :]
-                        
+
                         logger.info(
-                            f"[METIS] Injected continuation at step {step}: "
-                            f"{continuation}"
+                            f"[METIS] Anti-Lazy: Re-sampled, model continues thinking freely"
                         )
-                        
-                        # Add to visualizer
-                        cont_signal = CognitiveSignal(decision=Decision.DEEP, introspection="[Anti-Lazy Extension]")
-                        for cid in cont_ids:
-                            generated_tokens.append(cid)
-                            if self._on_token:
-                                txt = tokenizer.decode([cid], skip_special_tokens=True)
-                                self._on_token(txt, cont_signal)
-                                time.sleep(0.02)
-                        
-                        # Loop continue with last token of continuation
-                        next_token_id = cont_ids[-1]
-                        input_ids = torch.tensor([[next_token_id]], device=model.device)
-                        
-                        # Skip the normal append at bottom
-                        continue 
+
+                        # Fall through to normal append below
                     else:
-                        # Thinking block closed naturally, ensure </thinking> tag is visible
+                        # Thinking block closed naturally
                         is_thinking = False
-                        # Flush vis_buffer tokens (including </thinking>)
                         if vis_buffer:
                             for t, s in vis_buffer:
                                 if self._on_token:
                                     self._on_token(t, s)
                             vis_buffer.clear()
-                        logger.info(f"[METIS] Thinking block closed naturally at {tokens_in_block} tokens")
+                        logger.info(
+                            f"[METIS] Thinking block closed naturally "
+                            f"at {tokens_in_block} tokens"
+                        )
 
             generated_tokens.append(next_token_id)
 

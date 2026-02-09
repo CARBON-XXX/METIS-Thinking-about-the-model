@@ -142,6 +142,7 @@ class CognitiveVisualizer:
         self.token_count = 0
         self.generated_text = ""
         self.signals: list = []
+        self._is_thinking = False
 
     def on_token(self, token_text: str, signal: CognitiveSignal) -> None:
         """Streaming callback: invoked for each generated token"""
@@ -149,17 +150,46 @@ class CognitiveVisualizer:
         self.generated_text += token_text
         self.signals.append(signal)
 
+        # Detect thinking state transitions from introspection markers
+        intro = signal.introspection or ""
+        if intro.startswith("[Thinking"):
+            if not self._is_thinking:
+                self._is_thinking = True
+                sys.stdout.write(
+                    f"\n  {C.BG_MAGENTA}{C.BOLD}{C.WHITE}"
+                    f" >> THINKING START ({intro}) "
+                    f"{C.RESET}\n\n"
+                )
+                sys.stdout.flush()
+                return
+
+        # Detect </thinking> in token stream
+        if "</thinking>" in token_text or "</thinking" in token_text:
+            if self._is_thinking:
+                self._is_thinking = False
+                sys.stdout.write(
+                    f"\n  {C.BG_MAGENTA}{C.BOLD}{C.WHITE}"
+                    f" << THINKING END "
+                    f"{C.RESET}\n\n"
+                )
+                sys.stdout.flush()
+                return
+
         dc = decision_color(signal.decision)
         di = decision_icon(signal.decision)
         bc = boundary_color(signal.boundary_action)
         cb = confidence_bar(signal.confidence)
-
-        # Sampling mode label (shows METIS actual intervention)
         sl = sampling_label(signal.decision)
 
-        # Real-time output
+        # Thinking prefix: clearly mark tokens inside <thinking> block
+        think_prefix = (
+            f"{C.MAGENTA}THINK{C.RESET} "
+            if self._is_thinking else "      "
+        )
+
         sys.stdout.write(
             f"  {C.GRAY}[{self.token_count:3d}]{C.RESET} "
+            f"{think_prefix}"
             f"{dc}{C.BOLD}{di}{C.RESET} "
             f"{C.CYAN}H={signal.semantic_entropy:.2f}{C.RESET} "
             f"z={signal.z_score:+.2f} "
@@ -168,8 +198,8 @@ class CognitiveVisualizer:
             f"{bc}{signal.boundary_action.name:8s}{C.RESET} "
             f"{C.DIM}{repr(token_text)}{C.RESET}"
         )
-        if signal.introspection:
-            sys.stdout.write(f"  {C.MAGENTA}<< {signal.introspection}{C.RESET}")
+        if intro and not intro.startswith("[Thinking"):
+            sys.stdout.write(f"  {C.MAGENTA}<< {intro}{C.RESET}")
         sys.stdout.write("\n")
         sys.stdout.flush()
 
@@ -330,8 +360,8 @@ def run_demo(model, tokenizer, prompt: str, max_tokens: int = 200, force_think: 
 
     # --- Phase 1: METIS Cognitive Monitoring ---
     print(f"\n  {C.BOLD}>> METIS Cognitive Monitoring...{C.RESET}")
-    print(f"  {C.GRAY}{'Token':>7} Mode  Entropy  z-score  Confidence   Boundary   Text{C.RESET}")
-    print(f"  {C.GRAY}{'-'*75}{C.RESET}")
+    print(f"  {C.GRAY}{'Token':>7}        Mode  Entropy  z-score  Confidence   Boundary   Text{C.RESET}")
+    print(f"  {C.GRAY}{'-'*85}{C.RESET}")
 
     start = time.perf_counter()
     result = engine.generate(
@@ -346,19 +376,19 @@ def run_demo(model, tokenizer, prompt: str, max_tokens: int = 200, force_think: 
     # --- Phase 2: Final Output ---
     # Display thinking block separately if present
     if result.thinking_text:
-        print(f"\n  {C.BOLD}{C.MAGENTA}>> Thinking Process:{C.RESET}")
-        print(f"  {C.DIM}{'-'*60}{C.RESET}")
+        print(f"\n  {C.BG_MAGENTA}{C.BOLD}{C.WHITE} THINKING PROCESS {C.RESET}")
+        print(f"  {C.MAGENTA}{'='*60}{C.RESET}")
         for line in result.thinking_text.split('\n'):
-            print(f"  {C.DIM}{line}{C.RESET}")
-        print(f"  {C.DIM}{'-'*60}{C.RESET}")
+            print(f"  {C.MAGENTA}|{C.RESET} {C.DIM}{line}{C.RESET}")
+        print(f"  {C.MAGENTA}{'='*60}{C.RESET}")
 
-    print(f"\n  {C.BOLD}>> Final Answer:{C.RESET}")
+    print(f"\n  {C.BG_GREEN}{C.BOLD}{C.WHITE} FINAL ANSWER {C.RESET}")
     if result.was_refused:
         print(f"  {C.RED}{C.BOLD}[REFUSED]{C.RESET} {result.text}")
     elif result.was_hedged:
         print(f"  {C.YELLOW}[HEDGED]{C.RESET} {result.text}")
     else:
-        print(f"  {C.GREEN}[CONFIDENT]{C.RESET} {result.text}")
+        print(f"  {result.text}")
 
     print(f"\n  {C.DIM}({result.tokens_generated} tokens, {elapsed*1000:.0f}ms){C.RESET}")
 
