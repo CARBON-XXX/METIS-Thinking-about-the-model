@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metis-cognitive"
+version = "9.0.0"
+description = "METIS — Metacognitive Entropy-driven Thinking & Introspection System. A cognitive layer for LLMs that provides real-time uncertainty monitoring, dual-system reasoning, and epistemic boundary detection."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+authors = [
+    {name = "METIS Contributors"},
+]
+keywords = [
+    "metacognition",
+    "semantic-entropy",
+    "llm",
+    "hallucination-detection",
+    "cognitive-architecture",
+    "dual-process-theory",
+    "chain-of-thought",
+    "uncertainty-quantification",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.30",
+]
+
+[project.optional-dependencies]
+semantic-entropy = [
+    "sentence-transformers>=2.0",
+]
+dev = [
+    "ruff",
+    "pytest",
+]
+
+[project.urls]
+Homepage = "https://github.com/METIS-Cognitive/METIS"
+Documentation = "https://github.com/METIS-Cognitive/METIS/tree/main/docs"
+Repository = "https://github.com/METIS-Cognitive/METIS"
+Issues = "https://github.com/METIS-Cognitive/METIS/issues"
+
+[tool.setuptools.packages.find]
+include = ["metis*"]
+exclude = ["metis.v9*", "metis._archive*"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

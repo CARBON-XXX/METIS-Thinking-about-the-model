@@ -1,7 +1,19 @@
 torch>=2.0.0
+
 transformers>=4.36.0
+
 vllm>=0.4.0
+
 datasets
+
 tqdm
+
 prometheus-client
+
 safetensors
+
+# Semantic Entropy (Kuhn et al.) — NLI equivalence checking
+# Default NLI model: cross-encoder/nli-deberta-v3-base
+# Optional embedding fallback:
+# sentence-transformers>=2.2.0
+

@@ -34,3 +34,41 @@ venv/
 *.bin
 *.safetensors
 *.gguf
+
+# Archive / Legacy
+metis/_archive/
+
+# Virtual environments
+.venv/
+
+# Debug scripts
+debug_*.py
+
+# Windsurf
+.windsurf/
+
+# V9 experimental (not ready for release)
+metis/v9/
+
+# Local dev guides
+docs/WSL2_VLLM_SETUP.md
+
+# Local benchmarks & test scripts
+benchmark_*.py
+benchmark_results/
+test_*.py
+test_*.log
+test_output.txt
+tests/
+
+# Local dev scripts (hardcoded paths)
+scripts/
+
+# Runtime artifacts
+*_knowledge_gaps.json
+
+# External plugins
+skills/
+
+# Old package (migrated to metis/)
+sedac/
