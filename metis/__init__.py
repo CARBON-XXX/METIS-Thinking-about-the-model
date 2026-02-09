@@ -41,9 +41,6 @@ __author__ = "CARBON-XXX"
 from .metis import Metis
 from .inference import MetisInference
 
-# Backward-compatible aliases (deprecated — will be removed in v11)
-SEDAC = Metis
-SEDACInference = MetisInference
 from .core.types import (
     Decision,
     EpistemicState,

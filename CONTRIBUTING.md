@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve SEDAC.
+Thanks for helping improve METIS.
 
 ## Development Setup
 
@@ -10,26 +10,23 @@ Thanks for helping improve SEDAC.
    pip install -r requirements.txt
    ```
 
-2. Patch vLLM (required for runtime experiments):
+2. Run the demo to verify your setup:
 
    ```bash
-   python patch_vllm_surgical.py
-   python patch_vllm_openai_metrics.py
+   python demo_metis.py
    ```
 
-## Running Benchmarks
+## Project Structure
 
-- Speed benchmarks:
-
-  ```bash
-  python sedac_test_suite.py --config configs/test_matrix_speed.json --out-dir artifacts/reports/speed_gptq --verbose
-  ```
-
-- fp16 variant (more VRAM required):
-
-  ```bash
-  python sedac_test_suite.py --config configs/test_matrix_speed_fp16.json --out-dir artifacts/reports/speed_fp16 --verbose
-  ```
+```
+metis/
+  core/          # Signal processing: entropy, statistics, types
+  cognitive/     # Higher-order: CoT, boundary guard, curiosity
+  integrations/  # Hook API for external model integration
+  inference.py   # Main inference pipeline
+docs/            # Philosophy, metacognition, roadmap
+demo_metis.py    # Interactive cognitive demo
+```
 
 ## Pull Requests
 
@@ -43,9 +40,7 @@ Thanks for helping improve SEDAC.
 Please use the bug report template and include:
 
 - GPU model and VRAM
-- CUDA/driver version
-- vLLM version
+- Python / PyTorch / Transformers version
 - Model identifier
-- Config JSON used
 - Full logs (attach or link)
 

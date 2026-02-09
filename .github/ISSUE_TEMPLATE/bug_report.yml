@@ -31,7 +31,8 @@ body:
         - GPU / VRAM:
         - Driver / CUDA:
         - Python:
-        - vLLM:
+        - PyTorch:
+        - Transformers:
         - Model:
     validations:
       required: true

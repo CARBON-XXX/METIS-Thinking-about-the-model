@@ -7,8 +7,8 @@
 ## Core Paradigm Shift
 
 ```
-V9  (Tool view):       LLM → SEDAC(monitor) → User
-V10 (Metacognition):   LLM ⟺ SEDAC(self)    → Cognitive Behavior
+V9  (Tool view):       LLM → METIS(monitor) → User
+V10 (Metacognition):   LLM ⟺ METIS(self)    → Cognitive Behavior
 ```
 
 ### What is Metacognition?

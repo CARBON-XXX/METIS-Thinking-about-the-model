@@ -5,7 +5,7 @@ Describe the change and its motivation.
 ## Testing
 
 - [ ] Ran `python -m py_compile` on modified Python files
-- [ ] Ran `sedac_test_suite.py` (attach report path)
+- [ ] Ran `demo_metis.py` to verify basic functionality
 
 ## Checklist
 
