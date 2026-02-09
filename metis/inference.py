@@ -307,18 +307,22 @@ class MetisInference:
             # LaTeX/math tokens have low entropy even during loops, so
             # token-level signals alone cannot catch this.
             if step >= _REP_CHECK_START:
-                # Jaccard scan: checks for bag-of-words similarity
-                # Catches "semantic loops" where model rephrases the same content
-                # e.g. "Let's construct X" vs "We try to construct X"
-                max_window = min(len(generated_tokens) // 2, 128)
-                rep_len, match_score = self._detect_repetition_jaccard(
-                    generated_tokens, max_window, threshold=0.6
+                # Dense scan: check all possible window sizes up to N/2
+                # Limit max_window to 256 to allow catching paragraph-level loops
+                max_window = min(len(generated_tokens) // 2, 256)
+                
+                # Hybrid detection: 
+                # - Short patterns: Strict positional matching (avoids false positives on math steps)
+                # - Long patterns: Loose Jaccard matching (catches semantic loops/rephrasing)
+                rep_len, match_score = self._detect_repetition_hybrid(
+                    generated_tokens, max_window
                 )
+                
                 if rep_len > 0:
                     repetition_events += 1
                     # Ensure log is visible
                     print(
-                        f"\n[METIS] DETECTED REPETITION (Jaccard) len={rep_len} "
+                        f"\n[METIS] DETECTED REPETITION len={rep_len} "
                         f"score={match_score:.2f} event={repetition_events}\n"
                     )
                     logger.warning(
@@ -337,8 +341,9 @@ class MetisInference:
                         generated_tokens = generated_tokens[:-rep_len]
                         break
 
-                    if repetition_events >= 2 and not is_thinking:
-                        # Escalation 2: Trigger thinking to break the loop
+                    if not is_thinking:
+                        # Escalation 1: Trigger thinking IMMEDIATELY
+                        # If model repeats itself, it's stuck. Stop and think.
                         logger.info(
                             "[METIS] Repetition -> triggering thinking "
                             "to break loop"
@@ -375,15 +380,14 @@ class MetisInference:
                         is_thinking = True
                         thinking_start_step = step
                         cot_injected = True
-
-                    # Escalation 1: Apply n-gram penalty to logits
-                    # Penalize tokens that appeared in the repeated pattern.
-                    # For fuzzy matches, penalize the WHOLE repeated window tokens
-                    # to force a divergence.
-                    rep_token_ids = generated_tokens[-rep_len:]
-                    unique_rep = set(rep_token_ids)
-                    for tid in unique_rep:
-                        logits[0, tid] = float('-inf')  # NUCLEAR OPTION: forbid these tokens
+                    
+                    else:
+                        # Escalation 2: We are already thinking but still looping?
+                        # Apply nuclear penalty to repeated tokens to force divergence.
+                        rep_token_ids = generated_tokens[-rep_len:]
+                        unique_rep = set(rep_token_ids)
+                        for tid in unique_rep:
+                            logits[0, tid] = float('-inf')  # NUCLEAR OPTION: forbid these tokens
 
             # --- Token sampling (cognitive-aware) ---
             next_token_id = self._cognitive_sample(
@@ -600,35 +604,27 @@ class MetisInference:
         )
 
     @staticmethod
-    def _detect_repetition_jaccard(
-        tokens: List[int], max_window: int, threshold: float = 0.5
+    def _detect_repetition_hybrid(
+        tokens: List[int], max_window: int
     ) -> Tuple[int, float]:
         """
-        Detect repetition using Jaccard Similarity (Set-based).
-        Robust to insertion/deletion/reordering (semantic loops).
+        Hybrid repetition detection:
+        - Short windows (<32): Positional Fuzzy Match (Threshold 0.9)
+          Prevents false positives on valid math steps (x=y+1 vs x=y+2)
+        - Long windows (>=32): Jaccard Similarity (Threshold 0.6)
+          Catches semantic loops and rephrasing (paragraph level)
         
-        Args:
-            tokens: The token sequence
-            max_window: Maximum pattern length to check
-            threshold: Jaccard similarity threshold (0.0-1.0)
-            
-        Returns:
-            (length, jaccard_score)
+        Returns: (length, score)
         """
         n = len(tokens)
-        # Check a few strategic window sizes to cover different loop scales
-        # No need for dense scan; Jaccard is flexible.
-        windows = [16, 32, 64, 128]
         
-        best_w = 0
-        best_score = 0.0
-        
-        for w in windows:
+        # 1. Check Long Semantic Loops (Jaccard)
+        # Scan strategic large windows
+        jaccard_windows = [32, 48, 64, 96, 128, 192, 256]
+        for w in jaccard_windows:
             if w > max_window or n < 2 * w:
                 continue
-                
-            # Window A (previous): tokens[n-2w : n-w]
-            # Window B (current):  tokens[n-w : n]
+            
             set_a = set(tokens[n - 2 * w : n - w])
             set_b = set(tokens[n - w : n])
             
@@ -639,13 +635,25 @@ class MetisInference:
             union = len(set_a | set_b)
             jaccard = intersection / union
             
-            if jaccard >= threshold:
-                # Prefer larger windows if scores are similar
-                if jaccard > best_score or (jaccard == best_score and w > best_w):
-                    best_score = jaccard
-                    best_w = w
-                    
-        return best_w, best_score
+            if jaccard >= 0.6:
+                return w, jaccard
+
+        # 2. Check Short Exact/Near-Exact Loops (Positional)
+        # Dense scan downwards from 31 to 4
+        for w in range(min(max_window, 31), 3, -1):
+            if n < 2 * w:
+                continue
+                
+            matches = 0
+            for i in range(w):
+                if tokens[n - 2 * w + i] == tokens[n - w + i]:
+                    matches += 1
+            
+            score = matches / w
+            if score >= 0.9: # Strict for short windows
+                return w, score
+                
+        return 0, 0.0
 
     @staticmethod
     def _split_thinking(text: str) -> tuple:
