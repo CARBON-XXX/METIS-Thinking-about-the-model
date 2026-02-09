@@ -158,6 +158,8 @@ class MetisInference:
 
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
         input_ids = inputs.input_ids
+        # Save prompt IDs for KV cache regeneration if needed
+        prompt_ids = input_ids
         past_key_values = None
 
         # Start METIS session
@@ -235,6 +237,24 @@ class MetisInference:
                     generated_tokens = generated_tokens[:-rep_len]
                     # Clear viz buffer to remove visual garbage
                     vis_buffer.clear()
+
+                    # Regenerate KV cache to remove dirty context
+                    # If we don't do this, the deleted tokens remain in attention memory
+                    # and the model will likely loop again.
+                    if generated_tokens:
+                        gen_ids = torch.tensor([generated_tokens], device=model.device)
+                        full_input = torch.cat([prompt_ids, gen_ids], dim=1)
+                    else:
+                        full_input = prompt_ids
+
+                    with torch.no_grad():
+                        clean_out = model(
+                            input_ids=full_input,
+                            use_cache=True,
+                            return_dict=True,
+                        )
+                    past_key_values = clean_out.past_key_values
+                    logits = clean_out.logits[:, -1, :]
 
                 # Open <thinking> tag — model continues from here on its own
                 think_open = "\n<thinking>\n"
@@ -790,6 +810,8 @@ class MetisInference:
 
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
         input_ids = inputs.input_ids
+        # Save prompt IDs for KV cache regeneration if needed
+        prompt_ids = input_ids
         past_key_values = None
         generated = []
         confidences = []
