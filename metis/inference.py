@@ -182,9 +182,8 @@ class MetisInference:
         # Repetition detection state
         repetition_events = 0
         last_rep_check_step = 0
-        _REP_CHECK_INTERVAL = 20   # Check every N steps
-        _REP_CHECK_START = 40      # Start checking after N tokens
-        _REP_WINDOWS = [10, 16, 24, 32, 40, 52, 64, 80]  # Window sizes to scan
+        _REP_CHECK_INTERVAL = 1    # Check EVERY step
+        _REP_CHECK_START = 20      # Start checking early
         _REP_FORCE_STOP = 3        # Force stop after N repetition events
 
         # If thinking protocol enabled, write <thinking> tag to generated_tokens and notify callback
@@ -307,16 +306,14 @@ class MetisInference:
             # Detects when model is stuck repeating the same token sequence.
             # LaTeX/math tokens have low entropy even during loops, so
             # token-level signals alone cannot catch this.
-            if (
-                step >= _REP_CHECK_START
-                and step - last_rep_check_step >= _REP_CHECK_INTERVAL
-            ):
+            if step >= _REP_CHECK_START:
+                # Dense scan: check all possible window sizes up to N/2
+                max_window = min(len(generated_tokens) // 2, 128)
                 rep_len = self._detect_repetition(
-                    generated_tokens, _REP_WINDOWS
+                    generated_tokens, max_window
                 )
                 if rep_len > 0:
                     repetition_events += 1
-                    last_rep_check_step = step
                     logger.warning(
                         f"[METIS] Repetition detected at step {step}: "
                         f"pattern_len={rep_len}, event #{repetition_events}"
@@ -373,10 +370,11 @@ class MetisInference:
 
                     # Escalation 1: Apply n-gram penalty to logits
                     # Penalize tokens that appeared in the repeated pattern
+                    # to force model out of the loop.
                     rep_token_ids = generated_tokens[-rep_len:]
                     unique_rep = set(rep_token_ids)
                     for tid in unique_rep:
-                        logits[0, tid] -= 5.0  # Strong penalty
+                        logits[0, tid] = float('-inf')  # NUCLEAR OPTION: forbid these tokens
 
             # --- Token sampling (cognitive-aware) ---
             next_token_id = self._cognitive_sample(
@@ -594,27 +592,23 @@ class MetisInference:
 
     @staticmethod
     def _detect_repetition(
-        tokens: List[int], windows: List[int],
+        tokens: List[int], max_window: int,
     ) -> int:
         """
         Detect repeating token patterns in generated sequence.
-
-        Scans multiple window sizes. For each window W, checks if the last
-        2*W tokens consist of the same W-length pattern repeated twice.
-
+        Performs a dense scan of all window sizes [4, max_window].
+        
         Returns:
             Length of the repeating pattern (> 0 if repetition found), or 0.
-            Returns the LARGEST matching window for robust trimming.
+            Returns the LARGEST matching window.
         """
         n = len(tokens)
-        best = 0
-        for w in windows:
-            if n < 2 * w:
-                continue
+        # Scan downwards from max_window to 4 to find longest match
+        for w in range(max_window, 3, -1):
             # Compare tokens[-2w:-w] with tokens[-w:]
             if tokens[n - 2 * w : n - w] == tokens[n - w :]:
-                best = w
-        return best
+                return w
+        return 0
 
     @staticmethod
     def _split_thinking(text: str) -> tuple:
