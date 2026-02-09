@@ -97,32 +97,51 @@ class SemanticEntropyComputer:
     @torch.no_grad()
     def _compute_semantic_diversity(self, logits: torch.Tensor) -> float:
         """
-        Compute semantic diversity of top-k tokens.
+        Compute probability-weighted semantic diversity of top tokens.
         
-        Uses average cosine distance of top-k tokens in embedding space.
+        Uses softmax-weighted cosine distance in embedding space.
         Diversity in [0, 1]
-        - 0: top-k tokens semantically identical (e.g., synonyms)
-        - 1: top-k tokens semantically disjoint (genuine confusion)
+        - 0: high-probability tokens are semantically similar (synonyms)
+        - 1: high-probability tokens are semantically disjoint (genuine confusion)
+        
+        Key insight: unweighted cosine distance fails in high-dimensional space
+        (concentration of measure → all pairs ≈ orthogonal → diversity ≈ 1.0).
+        Probability weighting focuses on the tokens that actually matter:
+        if top-2 are synonyms at 40%+35%, their high-weight pair drives diversity DOWN.
         """
         if self._embedding_matrix is None:
             return 0.0
         
-        k = min(self._top_k, logits.shape[-1])
-        _, top_indices = torch.topk(logits, k, dim=-1)  # [batch, k]
+        # Use fewer tokens to focus on high-probability candidates
+        k = min(5, self._top_k, logits.shape[-1])
+        top_values, top_indices = torch.topk(logits, k, dim=-1)  # [batch, k]
+        
+        # Softmax over top-k only (re-normalize among candidates)
+        top_probs = F.softmax(top_values.float(), dim=-1)  # [batch, k]
         
         # Get embeddings and normalize
         top_embeddings = self._embedding_matrix[top_indices]         # [batch, k, hidden]
-        top_embeddings = F.normalize(top_embeddings, p=2, dim=-1)
+        top_embeddings = F.normalize(top_embeddings.float(), p=2, dim=-1)
         
         # Compute cosine similarity matrix
         sim_matrix = torch.bmm(top_embeddings, top_embeddings.transpose(1, 2))  # [batch, k, k]
         
-        # Extract upper triangle (excluding self-similarity diagonal)
-        mask = torch.triu(torch.ones(k, k, device=logits.device), diagonal=1)
-        n_pairs = k * (k - 1) / 2
+        # Probability-weighted pairwise distance
+        # Weight of pair (i, j) = p_i * p_j
+        # This ensures high-probability synonym pairs dominate the score
+        weight_matrix = torch.bmm(
+            top_probs.unsqueeze(2),   # [batch, k, 1]
+            top_probs.unsqueeze(1),   # [batch, 1, k]
+        )  # [batch, k, k]
         
-        avg_similarity = (sim_matrix * mask).sum(dim=(1, 2)) / (n_pairs + 1e-8)
-        diversity = (1.0 - avg_similarity).clamp(0, 1).item()
+        # Upper triangle mask (exclude self-similarity on diagonal)
+        mask = torch.triu(torch.ones(k, k, device=logits.device), diagonal=1)
+        
+        weighted_sim = (sim_matrix * weight_matrix * mask).sum(dim=(1, 2))
+        weight_sum = (weight_matrix * mask).sum(dim=(1, 2))
+        
+        avg_weighted_sim = weighted_sim / (weight_sum + 1e-8)
+        diversity = (1.0 - avg_weighted_sim).clamp(0, 1).item()
         
         return diversity
     

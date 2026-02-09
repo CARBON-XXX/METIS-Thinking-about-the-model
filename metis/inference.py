@@ -65,6 +65,8 @@ class MetisInference:
         refuse_consecutive_threshold: int = 3,
         # Self-correction budget control
         max_correction_tokens: int = 96,
+        # Maximum thinking tokens before forced closure
+        max_thinking_tokens: int = 512,
         # Callbacks
         on_seek: Optional[Callable[[str, str], Optional[str]]] = None,
         on_token: Optional[Callable[[str, 'CognitiveSignal'], None]] = None,
@@ -93,6 +95,7 @@ class MetisInference:
         self._refuse_grace_period = refuse_grace_period
         self._refuse_consecutive = refuse_consecutive_threshold
         self._max_correction_tokens = max_correction_tokens
+        self._max_thinking_tokens = max_thinking_tokens
         self._cot_manager = CoTManager()
         self._on_seek = on_seek
         self._on_token = on_token
@@ -101,7 +104,7 @@ class MetisInference:
     def generate(
         self,
         prompt: str,
-        max_tokens: int = 256,
+        max_tokens: int = 2048,
         temperature: float = 0.0,
         top_p: float = 0.9,
         enable_system2: bool = True,
@@ -183,9 +186,9 @@ class MetisInference:
 
         # Repetition detection state
         repetition_events = 0
-        last_rep_check_step = 0
-        _REP_CHECK_INTERVAL = 1    # Check EVERY step
-        _REP_CHECK_START = 20      # Start checking early
+        thinking_failed = False    # Set True when thinking was closed due to repetition
+        _REP_CHECK_INTERVAL = 5    # Check every N steps (saves compute + reduces false positives)
+        _REP_CHECK_START = 40      # Start after enough tokens for meaningful detection
         _REP_FORCE_STOP = 3        # Force stop after N repetition events
 
         # If thinking protocol enabled, write <thinking> tag to generated_tokens and notify callback
@@ -341,7 +344,7 @@ class MetisInference:
             # Detects when model is stuck repeating the same token sequence.
             # LaTeX/math tokens have low entropy even during loops, so
             # token-level signals alone cannot catch this.
-            if step >= _REP_CHECK_START:
+            if step >= _REP_CHECK_START and step % _REP_CHECK_INTERVAL == 0:
                 # Dense scan: check all possible window sizes up to N/2
                 # Limit max_window to 256 to allow catching paragraph-level loops
                 max_window = min(len(generated_tokens) // 2, 256)
@@ -374,9 +377,37 @@ class MetisInference:
                         )
                         # Trim the repeated tail
                         generated_tokens = generated_tokens[:-rep_len]
+                        # Close thinking block before break so _split_thinking
+                        # can separate thinking content from the answer.
+                        if is_thinking:
+                            close_tag = "\n</thinking>\n"
+                            close_ids = tokenizer.encode(
+                                close_tag, add_special_tokens=False
+                            )
+                            for tid in close_ids:
+                                generated_tokens.append(tid)
+                            if self._on_token is not None:
+                                self._on_token(
+                                    close_tag,
+                                    CognitiveSignal(
+                                        decision=Decision.DEEP,
+                                        introspection="[Thinking End: force-stop]",
+                                    ),
+                                )
+                            is_thinking = False
                         break
 
-                    if not is_thinking:
+                    if thinking_failed and not is_thinking:
+                        # Case 3: Thinking already failed, model STILL looping
+                        # outside thinking. No point continuing — force stop now.
+                        logger.warning(
+                            "[METIS] Post-thinking repetition -> "
+                            "force stopping (thinking already failed)"
+                        )
+                        generated_tokens = generated_tokens[:-rep_len]
+                        break
+
+                    elif not is_thinking:
                         # Escalation 1: Trigger thinking IMMEDIATELY
                         # If model repeats itself, it's stuck. Stop and think.
                         logger.info(
@@ -387,6 +418,23 @@ class MetisInference:
                         generated_tokens = generated_tokens[:-rep_len]
                         vis_buffer.clear()
 
+                        # Regenerate KV cache to remove dirty context
+                        if generated_tokens:
+                            gen_ids = torch.tensor([generated_tokens], device=model.device)
+                            full_input = torch.cat([prompt_ids, gen_ids], dim=1)
+                        else:
+                            full_input = prompt_ids
+
+                        with torch.no_grad():
+                            clean_out = model(
+                                input_ids=full_input,
+                                use_cache=True,
+                                return_dict=True,
+                            )
+                        past_key_values = clean_out.past_key_values
+                        logits = clean_out.logits[:, -1, :]
+
+                        # Inject <thinking> tag
                         think_open = "\n<thinking>\n"
                         think_open_ids = tokenizer.encode(
                             think_open, add_special_tokens=False
@@ -415,20 +463,139 @@ class MetisInference:
                         is_thinking = True
                         thinking_start_step = step
                         cot_injected = True
-                    
+
                     else:
-                        # Escalation 2: We are already thinking but still looping?
-                        # Apply nuclear penalty to repeated tokens to force divergence.
-                        rep_token_ids = generated_tokens[-rep_len:]
-                        unique_rep = set(rep_token_ids)
-                        for tid in unique_rep:
-                            logits[0, tid] = float('-inf')  # NUCLEAR OPTION: forbid these tokens
+                        # Escalation 2: Repetition INSIDE thinking block.
+                        # Force-close thinking and let model answer
+                        # with whatever reasoning it has so far.
+                        thinking_failed = True
+                        logger.info(
+                            "[METIS] Repetition in thinking -> "
+                            "force-closing to produce answer"
+                        )
+                        generated_tokens = generated_tokens[:-rep_len]
+                        vis_buffer.clear()
+
+                        # Rebuild KV cache without repeated tail
+                        if generated_tokens:
+                            gen_ids = torch.tensor(
+                                [generated_tokens], device=model.device
+                            )
+                            full_input = torch.cat(
+                                [prompt_ids, gen_ids], dim=1
+                            )
+                        else:
+                            full_input = prompt_ids
+                        clean_out = model(
+                            input_ids=full_input,
+                            use_cache=True,
+                            return_dict=True,
+                        )
+                        past_key_values = clean_out.past_key_values
+                        logits = clean_out.logits[:, -1, :]
+
+                        # Inject </thinking> to close the block
+                        close_tag = "\n</thinking>\n"
+                        close_tag_ids = tokenizer.encode(
+                            close_tag, add_special_tokens=False
+                        )
+                        for tid in close_tag_ids:
+                            generated_tokens.append(tid)
+                        if self._on_token is not None:
+                            self._on_token(
+                                close_tag,
+                                CognitiveSignal(
+                                    decision=Decision.DEEP,
+                                    introspection="[Thinking End: repetition]",
+                                ),
+                            )
+                        # Feed closing tag into model
+                        close_input = torch.tensor(
+                            [close_tag_ids], device=model.device
+                        )
+                        close_out = model(
+                            input_ids=close_input,
+                            past_key_values=past_key_values,
+                            use_cache=True,
+                            return_dict=True,
+                        )
+                        past_key_values = close_out.past_key_values
+                        logits = close_out.logits[:, -1, :]
+                        is_thinking = False
 
             # --- Token sampling (cognitive-aware) ---
             next_token_id = self._cognitive_sample(
                 logits, signal, temperature, top_p
             )
             
+            # --- Max Thinking Tokens: force-close thinking block ---
+            # Models not trained for <thinking> protocol (e.g. Qwen 2.5)
+            # will never generate </thinking> on their own, causing the
+            # thinking phase to consume ALL token budget with no answer.
+            # Force-close when limit is reached and let model output the answer.
+            if is_thinking:
+                tokens_in_block = step - thinking_start_step
+                if tokens_in_block >= self._max_thinking_tokens:
+                    logger.info(
+                        f"[METIS] Thinking budget exhausted "
+                        f"({tokens_in_block}/{self._max_thinking_tokens}), "
+                        f"force-closing thinking block"
+                    )
+                    # Inject </thinking>\n to close the block
+                    close_tag = "\n</thinking>\n"
+                    close_tag_ids = tokenizer.encode(
+                        close_tag, add_special_tokens=False
+                    )
+                    for tid in close_tag_ids:
+                        generated_tokens.append(tid)
+
+                    # Notify streaming callback
+                    if self._on_token is not None:
+                        close_signal = CognitiveSignal(
+                            decision=Decision.DEEP,
+                            introspection="[Thinking End: budget]",
+                        )
+                        self._on_token(close_tag, close_signal)
+
+                    # Feed closing tag into model so it continues with answer
+                    close_input = torch.tensor(
+                        [close_tag_ids], device=model.device
+                    )
+                    close_out = model(
+                        input_ids=close_input,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                    past_key_values = close_out.past_key_values
+                    logits = close_out.logits[:, -1, :]
+
+                    is_thinking = False
+                    # Flush buffered thinking tokens
+                    if vis_buffer:
+                        for t, s in vis_buffer:
+                            if self._on_token:
+                                self._on_token(t, s)
+                        vis_buffer.clear()
+
+                    # Re-sample from post-closing logits for the answer
+                    next_token_id = self._cognitive_sample(
+                        logits, signal, temperature, top_p
+                    )
+                    # Skip Anti-Lazy check since we just closed
+                    generated_tokens.append(next_token_id)
+                    if self._on_token is not None and next_token_id != tokenizer.eos_token_id:
+                        token_text = tokenizer.decode(
+                            [next_token_id], skip_special_tokens=True
+                        )
+                        self._on_token(token_text, signal)
+                    if next_token_id == tokenizer.eos_token_id:
+                        break
+                    input_ids = torch.tensor(
+                        [[next_token_id]], device=model.device
+                    )
+                    continue
+
             # --- Anti-Lazy Thinking: enforce minimum reasoning depth ---
             # If model tries to close <thinking> too early, suppress the closing
             # tag and let the model continue reasoning naturally.
@@ -461,19 +628,38 @@ class MetisInference:
                         # 2. Clear visualizer buffer (hide rejected tag)
                         vis_buffer.clear()
 
-                        # 3. Re-sample from current logits with </thinking> suppressed
-                        # Mask the closing tag's first token to prevent re-generation
+                        # 3. Rebuild KV cache after rollback
+                        # Without this, past_key_values still contains attention
+                        # memory for the deleted tokens (ghost context), causing
+                        # incoherent continuation.
+                        if generated_tokens:
+                            gen_ids = torch.tensor(
+                                [generated_tokens], device=model.device
+                            )
+                            full_input = torch.cat(
+                                [prompt_ids, gen_ids], dim=1
+                            )
+                        else:
+                            full_input = prompt_ids
+                        clean_out = model(
+                            input_ids=full_input,
+                            use_cache=True,
+                            return_dict=True,
+                        )
+                        past_key_values = clean_out.past_key_values
+                        logits = clean_out.logits[:, -1, :]
+
+                        # 4. Re-sample with </thinking> suppressed
                         close_tag_ids = tokenizer.encode("</thinking>", add_special_tokens=False)
                         if close_tag_ids:
                             logits[0, close_tag_ids[0]] = float('-inf')
 
-                        # Re-sample — model will naturally continue its reasoning
                         next_token_id = self._cognitive_sample(
                             logits, signal, temperature, top_p
                         )
 
                         logger.info(
-                            f"[METIS] Anti-Lazy: Re-sampled, model continues thinking freely"
+                            f"[METIS] Anti-Lazy: Re-sampled with clean KV cache"
                         )
 
                         # Fall through to normal append below
@@ -522,6 +708,21 @@ class MetisInference:
             input_ids = torch.tensor(
                 [[next_token_id]], device=model.device
             )
+
+        # Ensure thinking block is closed if still open (max_tokens exhausted / EOS)
+        if is_thinking:
+            close_tag = "\n</thinking>\n"
+            close_ids = tokenizer.encode(close_tag, add_special_tokens=False)
+            for tid in close_ids:
+                generated_tokens.append(tid)
+            if self._on_token is not None:
+                self._on_token(
+                    close_tag,
+                    CognitiveSignal(
+                        decision=Decision.DEEP,
+                        introspection="[Thinking End: budget]",
+                    ),
+                )
 
         # End METIS session
         self._metis.end_session()
@@ -656,8 +857,10 @@ class MetisInference:
         # 1. Check Long Semantic Loops (Jaccard)
         # Dense scan for Jaccard to catch arbitrary loop lengths
         # Step size 4 is granular enough for bag-of-words
-        # Range: [16, max_window]
-        for w in range(16, max_window + 1, 4):
+        # Range: [32, max_window]
+        # NOTE: min window=32. Shorter windows have extremely high false-positive
+        # rate on CJK text due to shared functional characters (的/是/了/在).
+        for w in range(32, max_window + 1, 4):
             if n < 2 * w:
                 continue
             
@@ -671,11 +874,11 @@ class MetisInference:
             union = len(set_a | set_b)
             jaccard = intersection / union
             
-            # Lower threshold to 0.55 to be more aggressive against semantic loops
-            if jaccard >= 0.55:
-                # Log the detection for debugging
-                if w > 32: # Only log significant semantic loops
-                     logger.debug(f"[METIS] Jaccard match: w={w}, score={jaccard:.2f}")
+            # Threshold 0.7: requires genuine token-set overlap, not just shared
+            # functional characters. Previous 0.45 caused massive false positives
+            # on normal Chinese mathematical reasoning text.
+            if jaccard >= 0.7:
+                logger.debug(f"[METIS] Jaccard match: w={w}, score={jaccard:.2f}")
                 return w, jaccard
 
         # 2. Check Short Exact/Near-Exact Loops (Positional)
@@ -739,24 +942,32 @@ class MetisInference:
         - Low confidence (high z + low conf): sharpen distribution, suppress long-tail noise
           (similar to contrastive decoding, Li et al. 2022)
         """
-        # -- 1. Decision-driven temperature/top_p adjustment --
+        # -- 1. Decision-driven adaptive temperature --
+        # METIS autonomously controls sampling strategy.
+        # The model's cognitive state determines exploration level,
+        # not a user-provided base temperature.
         if signal.decision == Decision.FAST:
-            # System 1: high certainty, greedy
+            # System 1: high certainty, greedy — no exploration needed
             temperature = 0.0
             top_p = 1.0
-        elif signal.decision == Decision.DEEP and base_temperature > 0:
-            # System 2: high uncertainty, widen search space
-            # Only raise temp when user explicitly set temperature>0, respect greedy intent
-            temperature = base_temperature * 1.3
-            top_p = min(base_top_p + 0.1, 1.0)
+        elif signal.decision == Decision.DEEP:
+            # System 2: genuine uncertainty, autonomous exploration
+            # Floor 0.4 ensures meaningful sampling even when base_temp=0.
+            # Scale with z_score: higher uncertainty → more exploration (cap 0.8).
+            z_boost = min(max(signal.z_score - 1.0, 0.0) * 0.1, 0.4)
+            temperature = max(0.4 + z_boost, base_temperature)
+            top_p = min(base_top_p + 0.1, 0.95)
         else:
+            # NORMAL: use base settings (greedy if base=0, else user's choice)
             temperature = base_temperature
             top_p = base_top_p
 
         # -- 2. Entropy-aware logit modulation --
         # When z-score high + confidence low: flat distribution, likely to sample unreliable tokens
         # Adaptive sharpening reduces random walk
-        if signal.z_score > 1.0 and signal.confidence < 0.5:
+        # SKIP at temperature=0: greedy decoding should be deterministic.
+        # Sharpening can flip argmax on quantized models due to float precision.
+        if temperature > 0 and signal.z_score > 1.0 and signal.confidence < 0.5:
             sharpness = 1.0 + 0.15 * min(signal.z_score - 1.0, 3.0)
             logits = logits * sharpness
 

@@ -28,9 +28,16 @@ AVG_Z_HEDGE_THRESHOLD = 0.5     # avg z > 0.5 -> HEDGE
 STREAK_HEDGE_THRESHOLD = 5      # consecutive high z > 5 -> HEDGE
 
 # Structural uncertainty filtering
-MIN_STREAK_FOR_REFUSE = 2       # REFUSE/SEEK requires >= 2 consecutive high-z tokens
-                                # Prevents single-token entropy spikes at paragraph boundaries
-UNCERTAIN_CONFIDENCE_GATE = 0.4 # UNCERTAIN zone: c > this is structural uncertainty -> no HEDGE
+MIN_STREAK_FOR_REFUSE = 3       # REFUSE/SEEK requires >= 3 consecutive high-z tokens
+                                # 2-token streaks are common at sentence/topic boundaries
+UNCERTAIN_CONFIDENCE_GATE = 0.3 # UNCERTAIN zone: c > this means top token still dominant -> no HEDGE
+
+# Semantic diversity gate: filters structurally-predictable tokens
+# In high-dimensional embedding space (~3584 dims), cosine similarity concentrates near 0,
+# so absolute diversity values are compressed into 0.5-1.0 range.
+# Gate at 0.75 filters punctuation/deterministic tokens (sd ~0.5-0.7) and
+# tokens where the dominant candidate pair has detectably higher similarity.
+SEMANTIC_DIVERSITY_GATE = 0.75
 
 
 class EpistemicBoundaryGuard:
@@ -63,8 +70,9 @@ class EpistemicBoundaryGuard:
         # (SlidingWindowStats needs sufficient samples for meaningful mean/std)
         self._min_warmup_tokens = min_warmup_tokens
         
-        # Accumulated uncertainty tracking
+        # Accumulated uncertainty tracking (with exponential decay)
         self._uncertainty_accumulator = 0.0
+        self._uncertainty_decay = 0.995  # ~200-token effective window
         self._token_count = 0
         self._high_z_streak = 0
         
@@ -110,7 +118,10 @@ class EpistemicBoundaryGuard:
         if self._token_count <= self._min_warmup_tokens:
             return self._emit(EpistemicState.LIKELY, BoundaryAction.GENERATE, "")
         
-        # Accumulate uncertainty (based on z-score)
+        # Accumulate uncertainty (based on z-score) with exponential decay
+        # Decay prevents early high-entropy tokens from permanently tainting
+        # the HEDGE decision for the rest of the generation.
+        self._uncertainty_accumulator *= self._uncertainty_decay
         if z > z_unc:
             self._uncertainty_accumulator += z
             self._high_z_streak += 1
@@ -121,9 +132,17 @@ class EpistemicBoundaryGuard:
         # z > z_unk: entropy significantly anomalous
         # Key distinction: single-token entropy spike at paragraph/sentence boundary != cognitive uncertainty
         # Therefore REFUSE/SEEK requires consecutive high-z streak as confirmation
+        #
+        # CRITICAL: semantic_diversity gate — high entropy with LOW diversity means
+        # top-k tokens are synonyms (lexical choice), NOT epistemic uncertainty.
+        # E.g., "包括"/"例如"/"有" all mean the same thing → don't HEDGE.
+        sd = signal.semantic_diversity
         if z > z_unk:
+            if sd < SEMANTIC_DIVERSITY_GATE:
+                # Low diversity: high entropy from synonyms/paraphrases, not uncertainty
+                return self._emit(EpistemicState.LIKELY, BoundaryAction.GENERATE, "")
             if self._high_z_streak >= MIN_STREAK_FOR_REFUSE:
-                # Sustained high z -> genuine cognitive uncertainty
+                # Sustained high z + high diversity -> genuine cognitive uncertainty
                 if c < CONFIDENCE_REFUSE:
                     return self._emit(
                         EpistemicState.UNKNOWN,
@@ -136,13 +155,16 @@ class EpistemicBoundaryGuard:
                         BoundaryAction.SEEK,
                         "External verification required",
                     )
-            # High confidence + high z-score: contradictory signal -> HEDGE
-            # Or single z spike + low confidence -> downgrade to HEDGE (not REFUSE)
-            return self._emit(
-                EpistemicState.UNCERTAIN,
-                BoundaryAction.HEDGE,
-                "Confidence-Entropy conflict, potential hallucination risk",
-            )
+            # High diversity + high z-score -> HEDGE only if sustained (streak >= 2)
+            # Single z_unk spike is common at topic/sentence boundaries and should NOT trigger HEDGE
+            if self._high_z_streak >= 2:
+                return self._emit(
+                    EpistemicState.UNCERTAIN,
+                    BoundaryAction.HEDGE,
+                    "Confidence-Entropy conflict, potential hallucination risk",
+                )
+            # Single spike: structural boundary, not cognitive uncertainty
+            return self._emit(EpistemicState.LIKELY, BoundaryAction.GENERATE, "")
         
         # -- Sustained uncertainty check (priority over single-token judgment) --
         # Even if individual tokens pass confidence gate (structural uncertainty),
@@ -156,11 +178,14 @@ class EpistemicBoundaryGuard:
             )
         
         # -- Uncertain zone (z_unc < z < z_unk) --
-        # Confidence gate: if top token confidence is still fairly high,
-        # it means model knows the answer but has multiple phrasings (structural uncertainty)
+        # Two gates to prevent false HEDGE:
+        # 1. Semantic diversity: low diversity = synonyms → NOT uncertainty
+        # 2. Confidence: high confidence = model knows → structural uncertainty
         if z > z_unc:
-            # Fix: add streak check to prevent single-token structural high entropy false-triggering HEDGE
-            if self._high_z_streak >= 2:
+            if sd < SEMANTIC_DIVERSITY_GATE:
+                # Low diversity: synonym choices, not real uncertainty
+                return self._emit(EpistemicState.LIKELY, BoundaryAction.GENERATE, "")
+            if self._high_z_streak >= 3:
                 if c < UNCERTAIN_CONFIDENCE_GATE:
                     return self._emit(
                         EpistemicState.UNCERTAIN,

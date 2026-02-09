@@ -143,6 +143,7 @@ class CognitiveVisualizer:
         self.generated_text = ""
         self.signals: list = []
         self._is_thinking = False
+        self._think_token_count = 0
 
     def on_token(self, token_text: str, signal: CognitiveSignal) -> None:
         """Streaming callback: invoked for each generated token"""
@@ -150,49 +151,69 @@ class CognitiveVisualizer:
         self.generated_text += token_text
         self.signals.append(signal)
 
-        # Detect thinking state transitions from introspection markers
         intro = signal.introspection or ""
+
+        # --- Thinking state transitions ---
         if intro.startswith("[Thinking"):
             if not self._is_thinking:
                 self._is_thinking = True
+                self._think_token_count = 0
+                self._think_line_buf = ""
+                # Draw thinking frame header
                 sys.stdout.write(
                     f"\n  {C.BG_MAGENTA}{C.BOLD}{C.WHITE}"
-                    f" >> THINKING START ({intro}) "
-                    f"{C.RESET}\n\n"
+                    f" INTERNAL REASONING "
+                    f"{C.RESET}\n"
+                    f"  {C.MAGENTA}{'─' * 60}{C.RESET}\n"
+                    f"  {C.MAGENTA}│{C.RESET} "
                 )
                 sys.stdout.flush()
                 return
 
-        # Detect </thinking> in token stream
         if "</thinking>" in token_text or "</thinking" in token_text:
             if self._is_thinking:
                 self._is_thinking = False
+                # Flush remaining line buffer
+                if self._think_line_buf.strip():
+                    pass  # already streamed
                 sys.stdout.write(
-                    f"\n  {C.BG_MAGENTA}{C.BOLD}{C.WHITE}"
-                    f" << THINKING END "
-                    f"{C.RESET}\n\n"
+                    f"\n  {C.MAGENTA}{'─' * 60}{C.RESET}\n"
+                    f"  {C.DIM}({self._think_token_count} tokens){C.RESET}\n\n"
                 )
                 sys.stdout.flush()
                 return
 
+        # --- Thinking: stream text in frame ---
+        if self._is_thinking:
+            self._think_token_count += 1
+            # Filter out tag fragments
+            clean = token_text.replace("<thinking>", "").replace("</thinking>", "")
+            if not clean:
+                return
+            # Stream text, wrapping at newlines with frame border
+            for ch in clean:
+                if ch == '\n':
+                    sys.stdout.write(f"\n  {C.MAGENTA}│{C.RESET} ")
+                else:
+                    sys.stdout.write(ch)
+            sys.stdout.flush()
+            return
+
+        # --- Non-thinking: cognitive signal trace ---
         dc = decision_color(signal.decision)
         di = decision_icon(signal.decision)
         bc = boundary_color(signal.boundary_action)
         cb = confidence_bar(signal.confidence)
         sl = sampling_label(signal.decision)
 
-        # Thinking prefix: clearly mark tokens inside <thinking> block
-        think_prefix = (
-            f"{C.MAGENTA}THINK{C.RESET} "
-            if self._is_thinking else "      "
-        )
-
+        sd = signal.semantic_diversity
+        sd_color = C.RED if sd >= 0.3 else C.GREEN
         sys.stdout.write(
             f"  {C.GRAY}[{self.token_count:3d}]{C.RESET} "
-            f"{think_prefix}"
             f"{dc}{C.BOLD}{di}{C.RESET} "
             f"{C.CYAN}H={signal.semantic_entropy:.2f}{C.RESET} "
             f"z={signal.z_score:+.2f} "
+            f"{sd_color}sd={sd:.2f}{C.RESET} "
             f"{cb} "
             f"{sl:>15s} "
             f"{bc}{signal.boundary_action.name:8s}{C.RESET} "
@@ -338,7 +359,7 @@ def load_model():
     return model, tokenizer
 
 
-def run_demo(model, tokenizer, prompt: str, max_tokens: int = 200, force_think: bool = False):
+def run_demo(model, tokenizer, prompt: str, max_tokens: int = 2048, force_think: bool = False):
     """Run a single demo: show how METIS monitors the generation process"""
     print(f"\n{'='*70}")
     print(f"{C.BOLD}{C.CYAN}Query: {prompt}{C.RESET}")
@@ -367,20 +388,14 @@ def run_demo(model, tokenizer, prompt: str, max_tokens: int = 200, force_think: 
     result = engine.generate(
         prompt,
         max_tokens=max_tokens,
-        temperature=0.0,
         enable_system2=False,
         use_thinking_protocol=force_think, 
     )
     elapsed = time.perf_counter() - start
 
     # --- Phase 2: Final Output ---
-    # Display thinking block separately if present
-    if result.thinking_text:
-        print(f"\n  {C.BG_MAGENTA}{C.BOLD}{C.WHITE} THINKING PROCESS {C.RESET}")
-        print(f"  {C.MAGENTA}{'='*60}{C.RESET}")
-        for line in result.thinking_text.split('\n'):
-            print(f"  {C.MAGENTA}|{C.RESET} {C.DIM}{line}{C.RESET}")
-        print(f"  {C.MAGENTA}{'='*60}{C.RESET}")
+    # Thinking is internal reasoning — not shown to user.
+    # thinking_text is preserved in result for cognitive analysis only.
 
     print(f"\n  {C.BG_GREEN}{C.BOLD}{C.WHITE} FINAL ANSWER {C.RESET}")
     if result.was_refused:

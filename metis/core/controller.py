@@ -285,16 +285,15 @@ class AdaptiveController:
         - If update() was called -> return cached EMA z-score
         - Otherwise -> compute on-the-fly using EMA mean/std
         
-        Fix: For very low entropy (very confident) tokens, force z-score = 0
-        Prevents numerical instability from extremely small variance (z blowup)
+        Returns the SAME z-score used internally by CUSUM/Bayesian posterior.
+        This ensures boundary guard decisions are consistent with internal signals.
         """
+        if self._step_count > 0:
+            # Return value already computed in update() (consistent with CUSUM)
+            return self._last_z_score
+        # Cold start: compute on-the-fly, clamp to avoid numerical instability
         if entropy < self.SAFE_ENTROPY_THRESHOLD:
             return 0.0
-
-        if self._step_count > 0:
-            # Prefer returning value already computed in update() (consistent with CUSUM)
-            return self._last_z_score
-        # Cold start: compute on-the-fly
         std = max(math.sqrt(self._entropy_emv), self.Z_SCORE_STD_FLOOR)
         return (entropy - self._entropy_ema) / std
 
