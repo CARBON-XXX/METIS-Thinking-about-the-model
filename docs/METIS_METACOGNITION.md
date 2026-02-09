@@ -194,6 +194,42 @@ METIS is the metacognitive infrastructure on the path to AGI:
 
 ---
 
+## Known Limitations & Open Challenges
+
+Intellectual honesty demands that we acknowledge the current boundaries of this work:
+
+### 1. Latency Cost of System 2
+
+System 1 (token-level entropy) operates in real-time with negligible overhead. However, System 2 — generation-level semantic entropy — requires:
+- **N forward-pass samples** (typically N=5) to generate diverse completions
+- **Bidirectional entailment checking** via an NLI model to cluster semantically equivalent outputs
+- **Entropy computation** over the resulting semantic clusters
+
+In high-concurrency production scenarios, this multi-sample pipeline can introduce **5–10× latency** compared to a single greedy decode. The current architecture mitigates this through System 1 → System 2 cascading (only escalating when token-level entropy exceeds a threshold), but a rigorous **latency vs. accuracy Pareto analysis** across different workloads remains an open task. Future work should quantify the exact trade-off curve and explore approximation techniques (e.g., early-exit sampling, cached entailment).
+
+### 2. NLI Model Dependency
+
+The semantic clustering step in System 2 relies on a Natural Language Inference model (e.g., DeBERTa-large-MNLI) to judge whether two generated outputs are semantically equivalent. This introduces a **systemic single point of failure**:
+- If the NLI model **misjudges entailment** (e.g., treats contradictory outputs as equivalent), the semantic entropy estimate collapses, and the metacognitive layer makes incorrect confidence assessments.
+- The NLI model itself has known biases (lexical overlap heuristics, sensitivity to negation).
+
+This is a fundamental architectural bottleneck. Potential mitigations include ensemble NLI, embedding-space clustering as a fallback, or training a lightweight task-specific entailment head — but none fully eliminate the dependency.
+
+### 3. Lack of Empirical Validation
+
+The current release presents **architecture and theory** but does not yet include quantitative benchmark results. The academic community rightfully prioritizes **empirical evidence** over design documents. Key missing evaluations:
+
+| Benchmark | What it tests | Status |
+|---|---|---|
+| TruthfulQA | Hallucination detection | Planned |
+| HaluEval | Hallucination classification | Planned |
+| FactScore | Factual precision | Planned |
+| SelfAware | "I don't know" calibration | Planned |
+
+Until these benchmarks are run and reported with proper baselines (token entropy, P(True), verbalized confidence), the claims of this architecture remain **theoretically motivated but empirically unvalidated**. This is the most critical gap to address.
+
+---
+
 ## Next Steps
 
 1. Refactor `AdaptiveThresholdController` → `MetacognitiveCore`
