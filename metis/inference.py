@@ -308,15 +308,23 @@ class MetisInference:
             # token-level signals alone cannot catch this.
             if step >= _REP_CHECK_START:
                 # Dense scan: check all possible window sizes up to N/2
-                max_window = min(len(generated_tokens) // 2, 128)
-                rep_len = self._detect_repetition(
-                    generated_tokens, max_window
+                # Limit max_window to 256 to allow catching paragraph-level loops
+                # while keeping performance reasonable.
+                max_window = min(len(generated_tokens) // 2, 256)
+                rep_len, match_score = self._detect_repetition_fuzzy(
+                    generated_tokens, max_window, threshold=0.75
                 )
                 if rep_len > 0:
                     repetition_events += 1
+                    # Ensure log is visible
+                    print(
+                        f"\n[METIS] DETECTED REPETITION len={rep_len} "
+                        f"score={match_score:.2f} event={repetition_events}\n"
+                    )
                     logger.warning(
                         f"[METIS] Repetition detected at step {step}: "
-                        f"pattern_len={rep_len}, event #{repetition_events}"
+                        f"len={rep_len}, score={match_score:.2f}, "
+                        f"event #{repetition_events}"
                     )
 
                     if repetition_events >= _REP_FORCE_STOP:
@@ -369,8 +377,9 @@ class MetisInference:
                         cot_injected = True
 
                     # Escalation 1: Apply n-gram penalty to logits
-                    # Penalize tokens that appeared in the repeated pattern
-                    # to force model out of the loop.
+                    # Penalize tokens that appeared in the repeated pattern.
+                    # For fuzzy matches, penalize the WHOLE repeated window tokens
+                    # to force a divergence.
                     rep_token_ids = generated_tokens[-rep_len:]
                     unique_rep = set(rep_token_ids)
                     for tid in unique_rep:
@@ -591,24 +600,39 @@ class MetisInference:
         )
 
     @staticmethod
-    def _detect_repetition(
-        tokens: List[int], max_window: int,
-    ) -> int:
+    def _detect_repetition_fuzzy(
+        tokens: List[int], max_window: int, threshold: float = 0.75
+    ) -> Tuple[int, float]:
         """
-        Detect repeating token patterns in generated sequence.
-        Performs a dense scan of all window sizes [4, max_window].
+        Detect repeating token patterns with fuzzy matching.
         
+        Args:
+            tokens: The token sequence
+            max_window: Maximum pattern length to check
+            threshold: Minimum matching ratio (0.0-1.0) to consider a repeat
+            
         Returns:
-            Length of the repeating pattern (> 0 if repetition found), or 0.
-            Returns the LARGEST matching window.
+            (length, match_score): Length of repeat and the match score.
+            (0, 0.0) if no repetition found.
         """
         n = len(tokens)
-        # Scan downwards from max_window to 4 to find longest match
-        for w in range(max_window, 3, -1):
-            # Compare tokens[-2w:-w] with tokens[-w:]
-            if tokens[n - 2 * w : n - w] == tokens[n - w :]:
-                return w
-        return 0
+        # Scan downwards from max_window to 3 to find longest match
+        # Lower limit 3 catches short loops like " a + b"
+        for w in range(max_window, 2, -1):
+            # Window A (previous): tokens[n-2w : n-w]
+            # Window B (current):  tokens[n-w : n]
+            
+            # Count matches
+            matches = 0
+            for i in range(w):
+                if tokens[n - 2 * w + i] == tokens[n - w + i]:
+                    matches += 1
+            
+            score = matches / w
+            if score >= threshold:
+                return w, score
+                
+        return 0, 0.0
 
     @staticmethod
     def _split_thinking(text: str) -> tuple:
