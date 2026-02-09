@@ -217,7 +217,7 @@ class MetisInference:
             if self._cot_manager.should_inject():
                 strategy = self._cot_manager.select_strategy(signal)
                 gen_context = tokenizer.decode(generated_tokens[-30:], skip_special_tokens=True) if generated_tokens else ""
-                cot_text = self._cot_manager.get_prompt(strategy, context=gen_context)
+                cot_text = self._cot_manager.get_prompt(strategy, context=gen_context, z_score=signal.z_score)
                 
                 # Dynamic Thinking: if not currently in a thinking block, open one
                 if not is_thinking:
@@ -528,7 +528,6 @@ class MetisInference:
                 final_signal.boundary_action == BoundaryAction.HEDGE
                 or uncertainty >= self._system2_uncertainty_score
                 or (se_result is not None and se_result.is_uncertain)
-                or boundary_ratio >= 0.10  # >=10% tokens triggered boundary -> hedge
             )
         )
 
@@ -820,7 +819,6 @@ class MetisInference:
         hallucination_corrected = False
         if (
             not was_refused
-            and meta_judgment.hallucination_risk > 0.3
             and meta_judgment.suggested_action in ("verify", "abort")
         ):
             logger.info(

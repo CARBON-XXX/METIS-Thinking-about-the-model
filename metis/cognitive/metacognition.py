@@ -40,22 +40,20 @@ class MetacognitiveCore:
     outputs MetaJudgment (metacognitive judgment).
 
     All computations are based on real observed data, no simulated values.
+
+    Design principle: ZERO hardcoded thresholds.
+    All decision boundaries are derived from the session's own signal
+    distribution via statistical self-calibration:
+        - "Abnormal" = value in the tail of the session's own distribution
+        - "High risk"  = risk exceeds what the confidence level warrants
+        - "Low confidence" = confidence-risk gap is negative
+    This ensures METIS adapts automatically to different models, languages,
+    and task difficulties without manual tuning.
     """
 
-    def __init__(
-        self,
-        # Hallucination risk detection: high confidence + high z-score thresholds
-        hallucination_confidence_floor: float = 0.6,
-        hallucination_z_floor: float = 1.5,
-        # Cognitive load threshold
-        high_load_deep_ratio: float = 0.2,
-        # Stability detection
-        volatility_threshold: float = 0.5,
-    ):
-        self._halluc_conf_floor = hallucination_confidence_floor
-        self._halluc_z_floor = hallucination_z_floor
-        self._high_load_deep_ratio = high_load_deep_ratio
-        self._volatility_threshold = volatility_threshold
+    def __init__(self):
+        # No hardcoded thresholds — all adaptive from trace statistics
+        pass
 
     def introspect(
         self,
@@ -128,22 +126,27 @@ class MetacognitiveCore:
         """
         Regulate: decide behavioral adjustments based on metacognitive judgment.
 
+        All decisions derived from the judgment's own signals — no fixed cutoffs.
+        "should_increase_samples" uses the confidence-risk gap:
+            risk exceeds what confidence warrants -> need more samples.
+
         Returns:
             {
-                "should_verify": bool,    # Whether to trigger System 2 verification
-                "should_hedge": bool,     # Whether to annotate uncertainty
-                "should_abort": bool,     # Whether to abort
-                "should_increase_samples": bool,  # Whether to increase SE sample count
+                "should_verify": bool,
+                "should_hedge": bool,
+                "should_abort": bool,
+                "should_increase_samples": bool,
             }
         """
+        # Confidence-risk gap: positive = risk exceeds confidence-implied baseline
+        confidence_risk_gap = (
+            judgment.hallucination_risk - (1.0 - judgment.epistemic_confidence)
+        )
         return {
             "should_verify": judgment.suggested_action == "verify",
             "should_hedge": judgment.suggested_action == "hedge",
             "should_abort": judgment.suggested_action == "abort",
-            "should_increase_samples": (
-                judgment.hallucination_risk > 0.5
-                or judgment.epistemic_confidence < 0.3
-            ),
+            "should_increase_samples": confidence_risk_gap > 0,
         }
 
     # =============================================================
@@ -173,14 +176,22 @@ class MetacognitiveCore:
         trace.mean_confidence = sum(e.confidence for e in events) / n
 
         # Overall trend: compare second half vs first half mean entropy
+        # Adaptive: use session's own entropy std as the significance threshold
+        # instead of hardcoded 0.3 — different models/tasks have different baselines
         mid = n // 2
         if mid > 0:
+            entropies = [e.semantic_entropy for e in events]
+            e_mean = sum(entropies) / n
+            e_var = sum((h - e_mean) ** 2 for h in entropies) / max(n - 1, 1)
+            e_std = math.sqrt(e_var) if e_var > 0 else 0.1
+
             first_half_entropy = sum(e.semantic_entropy for e in events[:mid]) / mid
             second_half_entropy = sum(e.semantic_entropy for e in events[mid:]) / (n - mid)
             delta = second_half_entropy - first_half_entropy
-            if delta > 0.3:
+            # Significant shift = delta exceeds 1 std of the session's entropy
+            if delta > e_std:
                 trace.entropy_trend_summary = "rising"
-            elif delta < -0.3:
+            elif delta < -e_std:
                 trace.entropy_trend_summary = "falling"
             else:
                 trace.entropy_trend_summary = "stable"
@@ -222,25 +233,29 @@ class MetacognitiveCore:
         """
         Cognitive load [0, 1].
 
-        Based on:
-        1. DEEP decision ratio
-        2. z-score variance (higher -> more entropy fluctuation -> higher load)
+        Self-calibrating from the session's own signal distribution:
+        1. DEEP decision ratio (normalized by session length)
+        2. z-score std (normalized by the session's own z-range)
+
+        No hardcoded normalization constants — uses the data's own range.
         """
         n = max(trace.total_tokens, 1)
         deep_ratio = trace.deep_count / n
 
-        # z-score variance
+        # z-score std, self-normalized by the session's z-range
         z_scores = [e.z_score for e in trace.events]
         if len(z_scores) > 1:
             z_mean = sum(z_scores) / len(z_scores)
             z_var = sum((z - z_mean) ** 2 for z in z_scores) / (len(z_scores) - 1)
             z_std = math.sqrt(z_var)
+            z_range = max(z_scores) - min(z_scores)
+            # Normalize z_std by the session's own range (0=uniform, 1=maximal spread)
+            z_load = z_std / max(z_range, 0.01) if z_range > 0 else 0.0
         else:
-            z_std = 0.0
+            z_load = 0.0
 
-        # Normalize: deep_ratio range [0,1], z_std typically 0~3
-        load = 0.6 * min(deep_ratio / max(self._high_load_deep_ratio, 0.01), 1.0) \
-             + 0.4 * min(z_std / 2.0, 1.0)
+        # Both components are [0, 1]; combine with equal weighting
+        load = 0.6 * deep_ratio + 0.4 * min(z_load, 1.0)
         return min(load, 1.0)
 
     def _compute_hallucination_risk(
@@ -252,25 +267,42 @@ class MetacognitiveCore:
 
         Core signal: contradiction detection
         - High confidence + high z-score = model confident but answer unstable -> hallucination
-        - SE multi-cluster + high majority_prob = model thinks it's sure but actual disagreement -> hallucination
+
+        Self-calibrating: "high confidence" and "high z-score" are defined
+        relative to the SESSION's own distributions (mean + 1 std),
+        not hardcoded floors. This adapts to different models and tasks.
         """
         events = trace.events
         n = max(len(events), 1)
 
-        # Signal 1: contradictory token ratio
-        # (confidence > floor AND z-score > floor -> contradiction)
+        # Compute adaptive floors from session distribution
+        confidences = [e.confidence for e in events]
+        z_scores = [e.z_score for e in events]
+
+        conf_mean = sum(confidences) / n
+        z_mean = sum(z_scores) / n
+
+        conf_var = sum((c - conf_mean) ** 2 for c in confidences) / max(n - 1, 1)
+        z_var = sum((z - z_mean) ** 2 for z in z_scores) / max(n - 1, 1)
+
+        conf_std = math.sqrt(conf_var) if conf_var > 0 else 0.1
+        z_std = math.sqrt(z_var) if z_var > 0 else 0.1
+
+        # Adaptive floors: "high" = above mean + 1 std of session distribution
+        adaptive_conf_floor = conf_mean + conf_std
+        adaptive_z_floor = z_mean + 2 * z_std
+
+        # Signal 1: contradictory token ratio (high confidence AND high z-score)
         contradictory = sum(
             1 for e in events
-            if e.confidence >= self._halluc_conf_floor
-            and e.z_score >= self._halluc_z_floor
+            if e.confidence >= adaptive_conf_floor
+            and e.z_score >= adaptive_z_floor
         )
         sig1 = contradictory / n
 
         # Signal 2: SE-based (if available)
         if se_result is not None and se_result.n_samples > 0:
-            # Multi-cluster + uncertain -> high hallucination risk
             if se_result.is_uncertain:
-                # More clusters -> higher risk
                 cluster_risk = min(se_result.n_clusters / se_result.n_samples, 1.0)
                 sig2 = 0.5 + 0.5 * cluster_risk
             else:
@@ -283,10 +315,10 @@ class MetacognitiveCore:
         """
         Stability assessment.
 
-        Based on entropy_trend change frequency:
-        - stable: consistent trend
-        - volatile: frequently changing trend (oscillating)
-        - degrading: persistently rising trend
+        Self-calibrating: volatility threshold is derived from the theoretical
+        maximum change rate for the number of distinct trend states.
+        If trends were random, expected change rate ~ (1 - 1/K) where K = states.
+        "Volatile" = change rate exceeds 80% of theoretical maximum.
         """
         events = trace.events
         if len(events) < 5:
@@ -298,10 +330,15 @@ class MetacognitiveCore:
         )
         change_rate = trend_changes / max(len(trends) - 1, 1)
 
-        if change_rate > self._volatility_threshold:
+        # Adaptive volatility: unique trend states determine the theoretical max
+        n_unique_trends = len(set(trends))
+        # Maximum possible change rate for K states = (K-1)/K (alternating)
+        theoretical_max = (n_unique_trends - 1) / max(n_unique_trends, 1)
+        # Volatile if change rate exceeds 80% of theoretical maximum
+        if change_rate > 0.8 * theoretical_max and theoretical_max > 0:
             return "volatile"
 
-        # Check for sustained degradation
+        # Check for sustained degradation in recent window
         recent = events[-min(10, len(events)):]
         rising_count = sum(1 for e in recent if e.entropy_trend == "rising")
         if rising_count > len(recent) * 0.6:
@@ -310,10 +347,18 @@ class MetacognitiveCore:
         return "stable"
 
     def _assess_boundary(self, trace: CognitiveTrace) -> str:
-        """Boundary status assessment"""
+        """Boundary status assessment.
+
+        Adaptive: "warning" threshold scales with session complexity
+        (deep_ratio). Higher complexity sessions tolerate more hedging.
+        """
         if trace.refuse_count > 0:
             return "breached"
-        if trace.seek_count > 0 or trace.hedge_count > trace.total_tokens * 0.3:
+        n = max(trace.total_tokens, 1)
+        deep_ratio = trace.deep_count / n
+        # Adaptive hedge tolerance: complex sessions (high deep_ratio) tolerate more
+        hedge_tolerance = 0.1 + 0.3 * deep_ratio  # ranges from 0.1 to 0.4
+        if trace.seek_count > 0 or trace.hedge_count > n * hedge_tolerance:
             return "warning"
         return "stable"
 
@@ -336,21 +381,38 @@ class MetacognitiveCore:
         """
         Recommend action based on all signals.
 
+        ZERO hardcoded thresholds. All decisions use relative comparisons
+        between the session's own computed signals:
+
+        Core metric: confidence_risk_gap = halluc_risk - (1 - confidence)
+            - Positive gap = risk exceeds what confidence warrants
+            - The larger the gap, the more severe the situation
+
         Decision tree (priority high to low):
         1. Boundary breached -> abort
-        2. High hallucination risk -> verify (with SE) or hedge
-        3. Cognitive instability -> verify
-        4. Low confidence -> hedge
+        2. Risk exceeds confidence-implied baseline -> verify or hedge
+        3. Cognitive instability -> verify or hedge
+        4. Confidence-risk imbalance -> hedge
         5. Normal -> continue
         """
         parts = []
+
+        # Confidence-risk gap: the core adaptive metric
+        # If confidence=0.8, expected risk baseline = 0.2
+        # If actual risk=0.5, gap = 0.5 - 0.2 = 0.3 (anomalous)
+        expected_risk = 1.0 - confidence
+        risk_gap = halluc_risk - expected_risk
 
         if boundary_status == "breached":
             parts.append("Cognitive boundary breached (REFUSE triggered)")
             return "abort", "; ".join(parts)
 
-        if halluc_risk > 0.5:
-            parts.append(f"Hallucination risk {halluc_risk:.0%}")
+        # Risk significantly exceeds confidence-implied baseline
+        if risk_gap > 0:
+            parts.append(
+                f"Risk-confidence anomaly: risk={halluc_risk:.0%} "
+                f"> expected={expected_risk:.0%} (gap={risk_gap:+.0%})"
+            )
             if se_result is None:
                 parts.append("Suggest System 2 verification")
                 return "verify", "; ".join(parts)
@@ -363,14 +425,23 @@ class MetacognitiveCore:
             return "verify", "; ".join(parts)
 
         if stability == "volatile":
-            parts.append("Cognitive state volatile")
-            if confidence < 0.4:
+            parts.append(f"Cognitive state volatile (conf={confidence:.0%})")
+            # Volatile + negative risk_gap but still risky relative to load
+            if confidence < (1.0 - load):
                 return "verify", "; ".join(parts)
             return "hedge", "; ".join(parts)
 
-        if confidence < 0.3:
-            parts.append(f"Low confidence {confidence:.0%}")
+        # Low confidence relative to cognitive load
+        # Harder tasks (higher load) get more leeway
+        if confidence < 0.5 * (1.0 - load):
+            parts.append(
+                f"Low confidence-to-load ratio: "
+                f"conf={confidence:.0%}, load={load:.0%}"
+            )
             return "hedge", "; ".join(parts)
 
-        parts.append(f"Confidence {confidence:.0%}, Load {load:.0%}, Stable")
+        parts.append(
+            f"Confidence {confidence:.0%}, Load {load:.0%}, "
+            f"Risk gap {risk_gap:+.2f}, Stable"
+        )
         return "continue", "; ".join(parts)

@@ -14,7 +14,6 @@ Strategy matrix:
 """
 from typing import List, Optional
 import collections
-import random
 
 from ..core.types import CognitiveSignal, Decision, CoTStrategy
 
@@ -64,24 +63,36 @@ MAX_COT_INJECTIONS_PER_SESSION = 3
 # =============================================================
 
 # English strategy frames
+# IMPORTANT: Templates are ordered by INTENSITY (mild → moderate → strong).
+# Selection is driven by z-score magnitude, NOT random.
 _COT_FRAMES_EN = {
     CoTStrategy.STANDARD: [
-        "\nWait, regarding '{ctx}' — let me think about this more carefully.",
+        # Mild: gentle pause
+        "\nLet me think about '{ctx}' a bit more carefully.",
+        # Moderate: explicit uncertainty
         "\nActually, I'm not fully confident about '{ctx}'. Let me reconsider.",
+        # Strong: urgent re-examination
         "\nBefore continuing, I should double-check my reasoning about '{ctx}'.",
     ],
     CoTStrategy.CLARIFICATION: [
-        "\nHold on — what exactly does '{ctx}' mean in this context? Let me clarify.",
+        # Mild: curiosity
+        "\nLet me make sure I'm clear on what '{ctx}' means here.",
+        # Strong: confusion acknowledged
         "\nI realize I might be conflating concepts around '{ctx}'. Let me be precise.",
     ],
     CoTStrategy.DECOMPOSITION: [
+        # Mild: structured approach
         "\nThis involves '{ctx}' which is complex. Let me break it down step by step.",
+        # Strong: necessity
         "\nTo handle '{ctx}' correctly, I need to decompose this into parts.",
     ],
     CoTStrategy.REFLECTION: [
-        "\nWait — I said '{ctx}', but does that actually follow? Let me re-check.",
+        # Mild: gentle re-check
+        "\nLet me re-check my reasoning about '{ctx}'.",
+        # Moderate: doubt
+        "\nWait — I said '{ctx}', but does that actually follow? Let me verify.",
+        # Strong: something wrong
         "\nSomething about '{ctx}' doesn't feel right. Let me verify my logic.",
-        "\nHold on, I need to reconsider whether '{ctx}' is truly correct.",
     ],
 }
 
@@ -93,24 +104,35 @@ _COT_FALLBACK_EN = {
 }
 
 # Chinese strategy frames
+# IMPORTANT: Ordered by INTENSITY (mild → moderate → strong).
 _COT_FRAMES_ZH = {
     CoTStrategy.STANDARD: [
-        "\n等等，关于'{ctx}'——让我再仔细想想。",
+        # Mild
+        "\n关于'{ctx}'，让我再想想。",
+        # Moderate
         "\n实际上，我对'{ctx}'不太确定，让我重新考虑一下。",
+        # Strong
         "\n在继续之前，我应该再检查一下关于'{ctx}'的推理。",
     ],
     CoTStrategy.CLARIFICATION: [
-        "\n等一下——'{ctx}'在这个语境中到底是什么意思？让我理清楚。",
+        # Mild
+        "\n让我确认一下'{ctx}'在这里的含义。",
+        # Strong
         "\n我可能混淆了'{ctx}'相关的概念，让我精确地分析。",
     ],
     CoTStrategy.DECOMPOSITION: [
-        "\n这涉及到'{ctx}'，比较复杂。让我分步骤来分析。",
+        # Mild
+        "\n这涉及到'{ctx}'，让我分步骤来分析。",
+        # Strong
         "\n为了正确处理'{ctx}'，我需要把它分解成几个部分。",
     ],
     CoTStrategy.REFLECTION: [
-        "\n等等——我说了'{ctx}'，但这真的成立吗？让我重新检查。",
+        # Mild: gentle re-check
+        "\n让我重新检查一下关于'{ctx}'的推理。",
+        # Moderate: something may be off
+        "\n等等——我说了'{ctx}'，但这真的成立吗？让我验证。",
+        # Strong: clear doubt
         "\n关于'{ctx}'，我感觉有些不对。让我验证一下我的逻辑。",
-        "\n等一下，我需要重新考虑'{ctx}'是否真的正确。",
     ],
 }
 
@@ -239,10 +261,21 @@ class CoTManager:
         self._steps_since_last_cot = 0
         self._last_strategy = strategy
 
-    def get_prompt(self, strategy: CoTStrategy, context: str = "") -> str:
+    def get_prompt(
+        self, strategy: CoTStrategy, context: str = "",
+        z_score: float = 0.0,
+    ) -> str:
         """Dynamically construct strategy prompt based on current generation context.
         
         Auto-detects language from context to select matching templates (EN/ZH).
+        
+        Template selection is SIGNAL-DRIVEN, not random:
+        Templates within each strategy are ordered by intensity (mild -> strong).
+        The z-score magnitude determines which intensity level to use:
+            z < 1.5  -> mild (index 0)
+            z < 2.5  -> moderate (middle index)
+            z >= 2.5 -> strong (last index)
+        This ensures the injected text's tone matches the actual uncertainty level.
         """
         # Select language-matched templates
         use_zh = _detect_cjk(context)
@@ -254,11 +287,38 @@ class CoTManager:
         
         if ctx:
             frames = frames_dict.get(strategy, frames_dict[CoTStrategy.STANDARD])
-            template = random.choice(frames)
+            template = self._select_by_intensity(frames, z_score)
             return template.format(ctx=ctx)
         else:
             # No context (first injection, no content generated yet)
             return fallback_dict.get(strategy, fallback_dict[CoTStrategy.STANDARD])
+
+    @staticmethod
+    def _select_by_intensity(frames: list, z_score: float) -> str:
+        """Select template by signal intensity instead of random.
+        
+        Maps z-score magnitude to template index:
+        Templates are pre-ordered [mild, ..., strong].
+        Higher z-score -> higher intensity template.
+        
+        Uses the z-score's position in a natural scale:
+            [0, 1.5) -> first template (mild)
+            [1.5, 2.5) -> middle template
+            [2.5, inf) -> last template (strong)
+        """
+        n = len(frames)
+        if n <= 1:
+            return frames[0]
+        # Map z-score to [0, n-1] index
+        # z < 1.5 -> 0, z in [1.5, 2.5) -> middle, z >= 2.5 -> n-1
+        z_abs = abs(z_score)
+        if z_abs < 1.5:
+            idx = 0
+        elif z_abs < 2.5:
+            idx = (n - 1) // 2
+        else:
+            idx = n - 1
+        return frames[idx]
 
     @staticmethod
     def _extract_context(text: str, max_chars: int = 40) -> str:
