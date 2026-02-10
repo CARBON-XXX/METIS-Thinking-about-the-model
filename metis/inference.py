@@ -176,6 +176,7 @@ class MetisInference:
         was_refused = False
         consecutive_refuse = 0
         cot_injected = False
+        cot_inject_token_idx = -1  # Token index where CoT was injected
         cot_strategies_used: List[CoTStrategy] = []
         seek_results: List[str] = []
         
@@ -309,6 +310,9 @@ class MetisInference:
                     thinking_start_step = step
                     self._cot_manager.record_injection(strategy)
                     cot_injected = True
+                    # Record token position BEFORE the <thinking> tag
+                    # so we can cleanly split answer from thinking later
+                    cot_inject_token_idx = len(generated_tokens) - len(think_open_ids)
                     cot_strategies_used.append(strategy)
 
                     logger.info(
@@ -486,6 +490,7 @@ class MetisInference:
                         is_thinking = True
                         thinking_start_step = step
                         cot_injected = True
+                        cot_inject_token_idx = len(generated_tokens) - len(think_open_ids)
 
                     elif not is_thinking:
                         # think=OFF: trim repeated tail + rebuild KV cache
@@ -801,7 +806,18 @@ class MetisInference:
         if was_refused:
             raw_text = self._refuse_message
             thinking_text = ""
+        elif cot_injected and cot_inject_token_idx > 0:
+            # CoT was dynamically injected mid-generation.
+            # Answer = tokens BEFORE injection point (the partial answer).
+            # Everything after injection = thinking process (discard from output).
+            answer_tokens = generated_tokens[:cot_inject_token_idx]
+            thinking_tokens = generated_tokens[cot_inject_token_idx:]
+            raw_text = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
+            thinking_text = tokenizer.decode(thinking_tokens, skip_special_tokens=True)
+            # Clean any stray tags from the answer portion
+            raw_text = re.sub(r'</?thinking[^>]*>', '', raw_text).strip()
         else:
+            # think=ON from start, or no thinking: use regex splitting
             full_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
             raw_text, thinking_text = self._split_thinking(full_text)
 
