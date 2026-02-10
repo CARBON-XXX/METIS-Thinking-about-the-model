@@ -917,6 +917,9 @@ class MetisInference:
         answer = pattern.sub('', text)
         # Also remove orphaned opening/closing tags (incomplete blocks)
         answer = re.sub(r'</?thinking>', '', answer)
+        # Remove incomplete tags: <thinking (no >) or </thinking (no >)
+        # Complete tags already removed above, so only fragments remain
+        answer = re.sub(r'</?thinking\b[^>]*', '', answer)
         # Clean up excess whitespace left behind
         answer = re.sub(r'\n{3,}', '\n\n', answer).strip()
 
