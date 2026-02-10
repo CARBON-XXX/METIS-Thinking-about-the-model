@@ -28,8 +28,8 @@ AVG_Z_HEDGE_THRESHOLD = 0.5     # avg z > 0.5 -> HEDGE
 STREAK_HEDGE_THRESHOLD = 5      # consecutive high z > 5 -> HEDGE
 
 # Structural uncertainty filtering
-MIN_STREAK_FOR_REFUSE = 3       # REFUSE/SEEK requires >= 3 consecutive high-z tokens
-                                # 2-token streaks are common at sentence/topic boundaries
+MIN_STREAK_FOR_REFUSE = 5       # REFUSE/SEEK requires >= 5 consecutive high-z tokens
+                                # 3-4 token streaks are common at reasoning transitions in math/logic
 UNCERTAIN_CONFIDENCE_GATE = 0.3 # UNCERTAIN zone: c > this means top token still dominant -> no HEDGE
 
 # Semantic diversity gate: filters structurally-predictable tokens
@@ -186,7 +186,7 @@ class EpistemicBoundaryGuard:
             if sd < SEMANTIC_DIVERSITY_GATE:
                 # Low diversity: synonym choices, not real uncertainty
                 return self._emit(EpistemicState.LIKELY, BoundaryAction.GENERATE, "")
-            if self._high_z_streak >= 3:
+            if self._high_z_streak >= MIN_STREAK_FOR_REFUSE:
                 if c < UNCERTAIN_CONFIDENCE_GATE:
                     return self._emit(
                         EpistemicState.UNCERTAIN,
