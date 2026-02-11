@@ -46,10 +46,10 @@ Modern Large Language Models are **blindly confident**. They answer *"What is th
 | Capability | Description | Mechanism |
 |:---|:---|:---|
 | **Dual-System Cognition** | Kahneman's System 1/2 switching — know when to speak vs. think | Adaptive entropy thresholds with Cornish-Fisher calibration |
-| **Epistemic Boundary Guard** | Real-time hallucination prevention — detect what the model doesn't know | Multi-signal z-score analysis with Bonferroni correction |
-| **Dynamic Chain-of-Thought** | Context-aware reasoning injection — not template CoT, but adaptive thinking | CoTManager with strategy selection (Standard / Clarification / Decomposition / Reflection) |
+| **Epistemic Boundary Guard** | Real-time hallucination prevention — detect what the model doesn't know | sd-weighted CUSUM control chart (Page, 1954) |
+| **Dynamic Chain-of-Thought** | Context-aware reasoning injection — deferred to sentence boundaries | Difficulty CUSUM + strategy selection (Standard / Clarification / Decomposition / Reflection) |
 | **Thinking Protocol** | Force deep `<thinking>...</thinking>` internal monologue with Anti-Lazy enforcement | System prompt engineering + premature closure detection + continuation injection |
-| **Cognitive-Aware Sampling** | Every token's sampling strategy adapts to its cognitive state | Greedy for confident tokens, exploration for uncertain ones |
+| **Cognitive-Aware Sampling** | Every token's sampling strategy adapts to its cognitive state | Greedy for confident, exploration for uncertain, + repetition penalty |
 | **Hallucination Self-Correction** | Draft-Critique-Refine pipeline triggered by metacognitive risk assessment | MetacognitiveCore introspection → verification re-generation |
 | **Curiosity Driver** | Autonomous knowledge gap recording for self-evolution | Runtime confusion detection → gap logging → targeted learning |
 | **Metacognitive Introspection** | Post-generation self-assessment with actionable judgments | Full trace analysis producing epistemic confidence, cognitive load, hallucination risk |
@@ -214,7 +214,10 @@ METIS **actively changes how each token is sampled** based on real-time cognitiv
 | **NORMAL** | User-configured temp/top_p | Standard sampling, no intervention |
 | **DEEP** (System 2) | `explore` (↑temp ×1.3, ↑top_p +0.1) | Model is uncertain — widen the search space |
 
-Additionally, **entropy-aware logit sharpening** (inspired by contrastive decoding; Li et al., 2022) suppresses noisy long-tail tokens when `z_score > 1.0` and confidence is low:
+Additionally:
+
+- **Repetition Penalty** (1.3×): Recently generated tokens have their logits penalized (positive logits ÷ penalty, negative logits × penalty) within a 128-token sliding window. This prevents repetition loops at the sampling level before they become detectable as post-hoc pattern matches.
+- **Entropy-Aware Logit Sharpening** (inspired by contrastive decoding; Li et al., 2022): When `z_score > 1.0` and confidence is low, the distribution is sharpened to suppress noisy long-tail tokens:
 
 ```python
 if signal.z_score > 1.0 and signal.confidence < 0.5:
@@ -224,25 +227,34 @@ if signal.z_score > 1.0 and signal.confidence < 0.5:
 
 ### 2. Dynamic Chain-of-Thought Injection
 
-When METIS detects sustained uncertainty (3+ consecutive DEEP decisions, or ≥5/12 high z-score steps), it injects reasoning tokens directly into the KV cache. Unlike static CoT templates, METIS constructs **context-aware** prompts:
+METIS uses a **CUSUM (Cumulative Sum) control chart** on cognitive difficulty to detect when the model needs to stop and think. This replaces crude counting heuristics with a principled sequential detection method:
 
 ```
-Model output: "...the speed of light is invariant in all reference frames"
-                                    ↓ CoT triggered
-Injected: "Wait — I said 'is invariant in all reference frames',
-           but does that actually follow? Let me re-check."
+Difficulty CUSUM:
+  S(t) = max(0, S(t-1) + (max(0, z) + deep_bonus) × sd − k)
+
+  - z: entropy z-score (higher = more uncertain)
+  - deep_bonus: +0.3 if AdaptiveController classified token as DEEP
+  - sd: semantic diversity (filters synonym noise — low sd = low contribution)
+  - k: allowance (absorbs normal fluctuations)
+
+When S(t) ≥ threshold → trigger <thinking> block
 ```
 
-**Strategy Selection Matrix:**
+**Deferred Injection:** When CUSUM triggers, METIS does **not** inject `<thinking>` immediately. Instead, it sets a pending flag and waits for a natural sentence boundary (。！？\n etc.) before injecting. This ensures the model enters thinking from a **coherent context**, not mid-sentence. A safety timeout (30 tokens) prevents indefinite deferral.
 
-| Strategy | Trigger | Example Injection |
+**Answer/Thinking Separation:** When CoT is dynamically injected mid-generation, the final output only contains text generated *before* the injection point. All thinking content (inside and outside `<thinking>` tags) is stripped by token-position splitting, not regex — eliminating tag leakage.
+
+**Strategy Selection** (diagnostic classification after trigger):
+
+| Strategy | Condition | Reasoning Mode |
 |:---|:---|:---|
-| **STANDARD** | Generic high entropy | *"I'm not fully confident about '{context}'. Let me reconsider."* |
-| **CLARIFICATION** | High semantic diversity + low confidence | *"What exactly does '{context}' mean in this context?"* |
-| **DECOMPOSITION** | 5+ consecutive DEEP decisions | *"'{context}' is complex. Let me break it down step by step."* |
-| **REFLECTION** | Decision oscillation (FAST↔DEEP switching) | *"I said '{context}', but does that actually follow?"* |
+| **REFLECTION** | Decision oscillation (FAST↔DEEP switching) | Model flip-flopping — re-examine assumptions |
+| **DECOMPOSITION** | 5+ consecutive DEEP decisions | High complexity — break problem into sub-steps |
+| **CLARIFICATION** | High semantic diversity + low confidence | Conceptual ambiguity — verify definitions |
+| **STANDARD** | Default | Generic high entropy — reason carefully |
 
-CoT injections update the model's KV cache and logits, ensuring the injected reasoning **actually influences** subsequent token predictions.
+The model generates its own reasoning freely inside `<thinking>` — no templates are injected.
 
 ### 3. Thinking Protocol
 
@@ -255,19 +267,31 @@ When enabled (`use_thinking_protocol=True`), METIS forces the model into a deep 
 
 ### 4. Epistemic Boundary Guard
 
-Prevents hallucination by detecting when the model is **outside its knowledge boundary**:
+Prevents hallucination using an **sd-weighted CUSUM control chart** — the same principled change-point detection method used in industrial process control (Page, 1954):
 
 ```
-High confidence + Low entropy   →  KNOWN         →  GENERATE
-Low confidence + High entropy   →  UNKNOWN       →  SEEK / REFUSE
-Accumulated uncertainty         →  UNCERTAIN     →  HEDGE
-High z + contradictory signals  →  HALLUCINATION →  HEDGE + flag
+Boundary CUSUM:
+  S(t) += (z − k) × sd     when z > k  (uncertain token)
+  S(t) *= decay             when z < 0  (confident token — gradual forgetting)
+  S(t) = 0                  after triggering (reset for next detection)
+
+Thresholds:
+  S(t) ≥  8.0 → HEDGE   (moderate sustained uncertainty)
+  S(t) ≥ 15.0 → SEEK    (high sustained uncertainty, confidence < 0.7)
+  S(t) ≥ 15.0 → REFUSE  (extreme sustained uncertainty, confidence < 0.3)
 ```
 
-**REFUSE uses a grace period + consecutive threshold:**
+**Why CUSUM instead of streak-counting:**
+- **Captures both duration and magnitude** — 5 tokens at z=3.0 and 15 tokens at z=1.0 are different situations
+- **sd-weighting filters synonym noise** — high z + low sd = lexical choice, not epistemic uncertainty
+- **Single statistic replaces 5+ hardcoded thresholds** — cleaner, more maintainable
+- **Gradual decay, not hard reset** — tolerates brief confident interjections within an uncertain region
+
+**Epistemic state** (KNOWN/LIKELY/UNCERTAIN/UNKNOWN) is classified by the current z-score for diagnostic reporting. **Boundary actions** are driven by the CUSUM level.
+
+**REFUSE uses a grace period:**
 - Early tokens (within first 8): REFUSE triggers immediately
-- After the model has committed to an answer: requires 3 consecutive REFUSE signals
-- This prevents false positives when the model is legitimately correcting a false premise (entropy spikes during correction are normal, not signs of ignorance)
+- After the model has committed to an answer: requires consecutive REFUSE signals
 
 ### 5. Hallucination Self-Correction (G4)
 
@@ -407,8 +431,11 @@ judgment.reasoning             # str — natural language explanation
 |:---|:---:|:---|
 | `SAFE_ENTROPY_THRESHOLD` | 0.6 | Entropy below this is always FAST (prevents false positives) |
 | `Z_SCORE_STD_FLOOR` | 0.15 | Minimum std for z-score calculation (numerical stability) |
-| `COT_COOLDOWN_STEPS` | 15 | Minimum steps between CoT injections |
+| `CUSUM_K` / `CUSUM_HEDGE_H` | 0.5 / 8.0 | Boundary guard CUSUM allowance / HEDGE threshold |
+| `COT_CUSUM_K` / `COT_CUSUM_H` | 0.3 / 4.0 | CoT difficulty CUSUM allowance / trigger threshold |
+| `COT_COOLDOWN_STEPS` | 40 | Minimum steps between CoT injections |
 | `MAX_COT_INJECTIONS` | 3 | Maximum CoT injections per session |
+| `_REP_PENALTY` | 1.3 | Repetition penalty factor (1.0 = none) |
 | `REFUSE_GRACE_PERIOD` | 8 | Tokens before REFUSE can trigger immediately |
 | `MIN_THINKING_TOKENS` | 64 | Minimum tokens before Anti-Lazy allows `</thinking>` closure |
 
