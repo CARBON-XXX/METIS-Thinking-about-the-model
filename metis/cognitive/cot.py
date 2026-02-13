@@ -39,6 +39,12 @@ COT_CUSUM_H = 4.0           # Trigger threshold
 COT_CUSUM_DECAY = 0.9       # Decay when z < 0 (slower than boundary)
 COT_DEEP_BONUS = 0.3        # Bonus contribution for DEEP decisions
 
+# Predictive trigger: entropy momentum (acceleration) early-warning
+# When entropy is accelerating upward (positive momentum), trigger CoT
+# even before CUSUM reaches full threshold.
+COT_MOMENTUM_H = 2.0        # Momentum accumulator trigger threshold
+COT_CUSUM_EARLY = COT_CUSUM_H * 0.5  # CUSUM must be at least 50% for momentum trigger
+
 # =============================================================
 # Strategy selection thresholds (diagnostic, NOT trigger-related)
 # =============================================================
@@ -73,10 +79,10 @@ class CoTManager:
     "stop and think". This replaces four crude counting heuristics with
     a single principled statistic.
 
-    The difficulty CUSUM:
-      S(t) = max(0, S(t-1) + (z_contrib + deep_bonus) * sd - k)
-    accumulates sd-weighted cognitive difficulty over time. When it
-    exceeds the threshold, a <thinking> block is injected.
+    Two trigger paths:
+    1. CUSUM trigger: S(t) >= threshold (classic cumulative detection)
+    2. Momentum trigger: entropy acceleration sustained + CUSUM >= 50%
+       (predictive — intervenes BEFORE full difficulty builds up)
 
     Template-free: CoTManager decides WHEN and WHY to think.
     The model generates its own reasoning inside the <thinking> block.
@@ -92,6 +98,10 @@ class CoTManager:
 
         # CUSUM state
         self._difficulty_cusum: float = 0.0
+
+        # Momentum-based predictive trigger state
+        self._momentum_acc: float = 0.0     # Accumulated positive momentum
+        self._momentum_steps: int = 0       # Consecutive positive-momentum steps
 
         # Strategy selection state (kept for diagnostic classification)
         self._decision_history: collections.deque = collections.deque(
@@ -131,6 +141,18 @@ class CoTManager:
             # Confident token: decay accumulated difficulty
             self._difficulty_cusum *= COT_CUSUM_DECAY
 
+        # ── Momentum accumulator (predictive early-warning) ──
+        # Positive entropy_momentum = entropy is accelerating upward
+        # Sustained acceleration predicts imminent difficulty spike
+        mom = signal.entropy_momentum
+        if mom > 0:
+            self._momentum_acc += mom
+            self._momentum_steps += 1
+        else:
+            # Decay on non-positive momentum (don't hard-reset)
+            self._momentum_acc *= 0.8
+            self._momentum_steps = 0
+
     def should_inject(self) -> bool:
         """
         Whether to trigger a <thinking> block.
@@ -144,7 +166,21 @@ class CoTManager:
         if self._steps_since_last_cot < self._cooldown_steps:
             return False
 
-        return self._difficulty_cusum >= COT_CUSUM_H
+        # Path 1: Classic CUSUM trigger (full difficulty detected)
+        if self._difficulty_cusum >= COT_CUSUM_H:
+            return True
+
+        # Path 2: Predictive momentum trigger (entropy accelerating)
+        # Requires: CUSUM already at 50%+ AND sustained momentum accumulation
+        # This catches rising-difficulty situations BEFORE CUSUM reaches threshold
+        if (
+            self._difficulty_cusum >= COT_CUSUM_EARLY
+            and self._momentum_acc >= COT_MOMENTUM_H
+            and self._momentum_steps >= 3
+        ):
+            return True
+
+        return False
 
     def select_strategy(self, signal: CognitiveSignal) -> CoTStrategy:
         """
@@ -179,6 +215,8 @@ class CoTManager:
         self._total_injections += 1
         self._steps_since_last_cot = 0
         self._difficulty_cusum = 0.0  # Reset CUSUM after injection
+        self._momentum_acc = 0.0
+        self._momentum_steps = 0
         self._last_strategy = strategy
 
     def reset(self) -> None:
@@ -186,6 +224,8 @@ class CoTManager:
         self._decision_history.clear()
         self._consecutive_deep = 0
         self._difficulty_cusum = 0.0
+        self._momentum_acc = 0.0
+        self._momentum_steps = 0
         self._steps_since_last_cot = self._cooldown_steps  # Allow first injection
         self._total_injections = 0
         self._last_strategy = CoTStrategy.NONE
@@ -215,6 +255,8 @@ class CoTManager:
         return {
             "total_injections": self._total_injections,
             "difficulty_cusum": round(self._difficulty_cusum, 2),
+            "momentum_acc": round(self._momentum_acc, 2),
+            "momentum_steps": self._momentum_steps,
             "consecutive_deep": self._consecutive_deep,
             "steps_since_last_cot": self._steps_since_last_cot,
             "last_strategy": self._last_strategy.value,

@@ -66,6 +66,7 @@ scripts/
 
 # Runtime artifacts
 *_knowledge_gaps.json
+traces/
 
 # External plugins
 skills/

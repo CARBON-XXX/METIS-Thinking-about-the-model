@@ -47,10 +47,12 @@ Modern Large Language Models are **blindly confident**. They answer *"What is th
 |:---|:---|:---|
 | **Dual-System Cognition** | Kahneman's System 1/2 switching — know when to speak vs. think | Adaptive entropy thresholds with Cornish-Fisher calibration |
 | **Epistemic Boundary Guard** | Real-time hallucination prevention — detect what the model doesn't know | sd-weighted CUSUM control chart (Page, 1954) |
-| **Dynamic Chain-of-Thought** | Context-aware reasoning injection — deferred to sentence boundaries | Difficulty CUSUM + strategy selection (Standard / Clarification / Decomposition / Reflection) |
+| **Dynamic Chain-of-Thought** | Context-aware reasoning injection — deferred to sentence boundaries | Difficulty CUSUM + momentum early-warning + strategy selection |
 | **Thinking Protocol** | Force deep `<thinking>...</thinking>` internal monologue with Anti-Lazy enforcement | System prompt engineering + premature closure detection + continuation injection |
-| **Cognitive-Aware Sampling** | Every token's sampling strategy adapts to its cognitive state | Greedy for confident, exploration for uncertain, + repetition penalty |
-| **Hallucination Self-Correction** | Draft-Critique-Refine pipeline triggered by metacognitive risk assessment | MetacognitiveCore introspection → verification re-generation |
+| **Cognitive-Aware Sampling** | Every token's sampling strategy adapts to its cognitive state | Greedy for confident, exploration for uncertain, + adaptive repetition penalty |
+| **Predictive Cognitive Signals** | Token surprise, entropy gradient, entropy momentum — prediction error tracking | -log₂ p(token) surprise + d(H)/dt gradient + EMA momentum |
+| **Cognitive Trace Export** | Full session trace exportable as JSON for analysis and auditing | Per-token CognitiveEvent with 13 signal dimensions |
+| **Hallucination Self-Correction** | Draft-Critique-Refine pipeline with 3-signal risk detection | Contradiction + token surprise + SE → Draft-Critique-Refine |
 | **Curiosity Driver** | Autonomous knowledge gap recording for self-evolution | Runtime confusion detection → gap logging → targeted learning |
 | **Metacognitive Introspection** | Post-generation self-assessment with actionable judgments | Full trace analysis producing epistemic confidence, cognitive load, hallucination risk |
 
@@ -216,7 +218,7 @@ METIS **actively changes how each token is sampled** based on real-time cognitiv
 
 Additionally:
 
-- **Repetition Penalty** (1.3×): Recently generated tokens have their logits penalized (positive logits ÷ penalty, negative logits × penalty) within a 128-token sliding window. This prevents repetition loops at the sampling level before they become detectable as post-hoc pattern matches.
+- **Adaptive Repetition Penalty** (1.2–1.5×): Penalty scales with cognitive state within a 128-token sliding window. Confident tokens get mild penalty (1.2×); uncertain tokens (high z-score) get strong penalty (up to 1.5×). Rising entropy momentum adds an extra +0.05 boost. This prevents repetition loops while preserving valid mathematical repetition.
 - **Entropy-Aware Logit Sharpening** (inspired by contrastive decoding; Li et al., 2022): When `z_score > 1.0` and confidence is low, the distribution is sharpened to suppress noisy long-tail tokens:
 
 ```python
@@ -241,7 +243,20 @@ Difficulty CUSUM:
 When S(t) ≥ threshold → trigger <thinking> block
 ```
 
-**Deferred Injection:** When CUSUM triggers, METIS does **not** inject `<thinking>` immediately. Instead, it sets a pending flag and waits for a natural sentence boundary (。！？\n etc.) before injecting. This ensures the model enters thinking from a **coherent context**, not mid-sentence. A safety timeout (30 tokens) prevents indefinite deferral.
+**Two trigger paths:**
+
+1. **CUSUM trigger** (reactive): `S(t) ≥ threshold` — classical cumulative difficulty detection
+2. **Momentum trigger** (predictive): When entropy is *accelerating upward* (sustained positive momentum) AND CUSUM is already at 50%+, trigger CoT **before** full difficulty builds up. This is like seismic P-wave early warning — act before the S-wave hits.
+
+```
+Momentum early-warning:
+  momentum_acc += entropy_momentum   (when momentum > 0)
+  momentum_acc *= 0.8                (when momentum ≤ 0, decay)
+
+  Trigger if: CUSUM ≥ 50% AND momentum_acc ≥ 2.0 AND 3+ consecutive steps
+```
+
+**Deferred Injection:** When either trigger fires, METIS does **not** inject `<thinking>` immediately. Instead, it sets a pending flag and waits for a natural sentence boundary (。！？\n etc.) before injecting. This ensures the model enters thinking from a **coherent context**, not mid-sentence. A safety timeout (30 tokens) prevents indefinite deferral.
 
 **Answer/Thinking Separation:** When CoT is dynamically injected mid-generation, the final output only contains text generated *before* the injection point. All thinking content (inside and outside `<thinking>` tags) is stripped by token-position splitting, not regex — eliminating tag leakage.
 
@@ -435,7 +450,8 @@ judgment.reasoning             # str — natural language explanation
 | `COT_CUSUM_K` / `COT_CUSUM_H` | 0.3 / 4.0 | CoT difficulty CUSUM allowance / trigger threshold |
 | `COT_COOLDOWN_STEPS` | 40 | Minimum steps between CoT injections |
 | `MAX_COT_INJECTIONS` | 3 | Maximum CoT injections per session |
-| `_REP_PENALTY` | 1.3 | Repetition penalty factor (1.0 = none) |
+| `_REP_PENALTY_BASE` / `_MAX` | 1.2 / 1.5 | Adaptive repetition penalty range |
+| `COT_MOMENTUM_H` | 2.0 | Momentum accumulator threshold for predictive CoT trigger |
 | `REFUSE_GRACE_PERIOD` | 8 | Tokens before REFUSE can trigger immediately |
 | `MIN_THINKING_TOKENS` | 64 | Minimum tokens before Anti-Lazy allows `</thinking>` closure |
 

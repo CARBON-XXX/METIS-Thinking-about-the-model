@@ -429,6 +429,19 @@ def run_demo(model, tokenizer, prompt: str, max_tokens: int = 2048, force_think:
     # --- Phase 3: Cognitive Report ---
     viz.print_summary(metis)
 
+    # --- Phase 4: Export cognitive trace ---
+    trace = metis.trace
+    if trace and trace.events:
+        traces_dir = os.path.join(os.path.dirname(__file__), "traces")
+        os.makedirs(traces_dir, exist_ok=True)
+        # Sanitize prompt for filename
+        safe_name = "".join(c if c.isalnum() or c in "_ " else "" for c in prompt[:40]).strip().replace(" ", "_")
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        trace_path = os.path.join(traces_dir, f"{ts}_{safe_name}.json")
+        with open(trace_path, "w", encoding="utf-8") as f:
+            f.write(trace.to_json())
+        print(f"\n  {C.DIM}Cognitive trace exported: {trace_path}{C.RESET}")
+
     metis.end_session()
     return result
 
