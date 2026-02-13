@@ -184,20 +184,23 @@ class CoTManager:
 
     def select_strategy(self, signal: CognitiveSignal) -> CoTStrategy:
         """
-        Select the most appropriate CoT strategy based on current signal characteristics.
+        Select the most appropriate CoT strategy based on current signal
+        characteristics AND cognitive phase.
 
         Priority (high to low):
-        1. REFLECTION  — decision oscillation (model flip-flopping between answers)
-        2. DECOMPOSITION — sustained deep reasoning (high problem complexity)
-        3. CLARIFICATION — high semantic diversity + low confidence (conceptual ambiguity)
+        1. REFLECTION  — oscillation OR confusion phase (model stuck/flip-flopping)
+        2. DECOMPOSITION — sustained depth OR exploration phase (need structure)
+        3. CLARIFICATION — high diversity + low confidence (conceptual ambiguity)
         4. STANDARD — generic high entropy
         """
-        # 1. Oscillation detection: frequent Decision switches in recent N steps
-        if self._detect_oscillation():
+        phase = signal.cognitive_phase
+
+        # 1. Oscillation or CONFUSION phase: model is stuck, needs self-reflection
+        if self._detect_oscillation() or phase == "confusion":
             return CoTStrategy.REFLECTION
 
-        # 2. Sustained depth: many consecutive DEEP steps, problem is complex
-        if self._consecutive_deep >= DECOMPOSITION_DEEP_STREAK:
+        # 2. Sustained depth or EXPLORATION phase: problem needs decomposition
+        if self._consecutive_deep >= DECOMPOSITION_DEEP_STREAK or phase == "exploration":
             return CoTStrategy.DECOMPOSITION
 
         # 3. Conceptual ambiguity: high semantic diversity + low confidence
