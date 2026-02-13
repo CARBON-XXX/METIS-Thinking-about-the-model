@@ -594,6 +594,9 @@ class MetisInference:
             # Attach surprise to signal (after sampling, we know which token was chosen)
             _token_log_prob = _log_probs[0, next_token_id].item()
             signal.token_surprise = max(0.0, -_token_log_prob / 0.6931471805599453)  # nats→bits
+
+            # Feed surprise back to boundary guard (1-step lag: affects NEXT step's CUSUM)
+            self._metis.feed_surprise(signal.token_surprise)
             
             # --- Max Thinking Tokens: force-close thinking block ---
             # Models not trained for <thinking> protocol (e.g. Qwen 2.5)

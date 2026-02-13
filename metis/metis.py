@@ -41,6 +41,7 @@ from .cognitive.switch import CognitiveSwitch
 from .cognitive.boundary import EpistemicBoundaryGuard
 from .cognitive.curiosity import CuriosityDriver
 from .cognitive.metacognition import MetacognitiveCore
+from .cognitive.phase import CognitivePhaseDetector
 
 
 class Metis:
@@ -87,6 +88,9 @@ class Metis:
         
         # -- Metacognitive layer: Introspection analysis --
         self._metacognition = MetacognitiveCore()
+        
+        # -- Cognitive phase detection (higher-level abstraction) --
+        self._phase_detector = CognitivePhaseDetector()
         
         # Model/tokenizer references (set by attach())
         self._model: Optional[nn.Module] = None
@@ -187,6 +191,10 @@ class Metis:
             cusum_alarm=self._controller.stats.get("change_detected", False),
         )
         
+        # 5b. Cognitive phase detection (uses windowed signal statistics)
+        phase = self._phase_detector.observe(signal)
+        signal.cognitive_phase = phase.value
+        
         # 5. Epistemic boundary evaluation (using Controller's dynamic z thresholds)
         # Get adaptive thresholds: z_unc ~ 85%, z_unk ~ 98% (skewness/kurtosis corrected)
         z_unc_dyn, z_unk_dyn = self._controller.get_dynamic_z_thresholds()
@@ -219,6 +227,7 @@ class Metis:
         self._controller.reset_session()
         self._boundary.reset()
         self._switch.reset()
+        self._phase_detector.reset()
         self._curiosity.start_session(query, context)
         self._entropy_buffer.clear()
         self._last_signal = None
@@ -286,6 +295,10 @@ class Metis:
         """Generation-level semantic entropy estimator (Kuhn et al.)"""
         return self._se_estimator
     
+    def feed_surprise(self, surprise: float) -> None:
+        """Feed token surprise back to boundary guard (1-step lag feedback)."""
+        self._boundary.feed_surprise(surprise)
+
     def get_uncertainty_score(self) -> float:
         """Get boundary guard's accumulated uncertainty score"""
         return self._boundary.get_uncertainty_score()

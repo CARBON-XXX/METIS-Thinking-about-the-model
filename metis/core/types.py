@@ -87,6 +87,9 @@ class CognitiveSignal:
     entropy_gradient: float = 0.0           # d(entropy)/dt — instantaneous rate of change
     entropy_momentum: float = 0.0           # EMA of gradient — captures acceleration/deceleration
 
+    # -- Cognitive phase (higher-level abstraction) --
+    cognitive_phase: str = "recall"         # fluent / recall / reasoning / exploration / confusion
+
     # -- Internal state (for debugging/visualization) --
     z_score: float = 0.0                    # Current token z-score
     cusum_alarm: bool = False               # Whether CUSUM change-point alarm triggered
@@ -158,6 +161,7 @@ class CognitiveEvent:
     token_surprise: float = 0.0
     entropy_gradient: float = 0.0
     entropy_momentum: float = 0.0
+    cognitive_phase: str = "recall"
     decision: Decision = Decision.NORMAL
     epistemic_state: EpistemicState = EpistemicState.LIKELY
     boundary_action: BoundaryAction = BoundaryAction.GENERATE
@@ -204,6 +208,7 @@ class CognitiveTrace:
             token_surprise=signal.token_surprise,
             entropy_gradient=signal.entropy_gradient,
             entropy_momentum=signal.entropy_momentum,
+            cognitive_phase=signal.cognitive_phase,
             decision=signal.decision,
             epistemic_state=signal.epistemic_state,
             boundary_action=signal.boundary_action,
@@ -225,6 +230,7 @@ class CognitiveTrace:
                 "token_surprise": round(e.token_surprise, 4),
                 "entropy_gradient": round(e.entropy_gradient, 4),
                 "entropy_momentum": round(e.entropy_momentum, 4),
+                "cognitive_phase": e.cognitive_phase,
                 "decision": e.decision.value,
                 "epistemic_state": e.epistemic_state.value,
                 "boundary_action": e.boundary_action.value,

@@ -59,6 +59,7 @@ from .core.types import (
 )
 from .core.semantic_entropy import SemanticEntropyEstimator
 from .cognitive.metacognition import MetacognitiveCore
+from .cognitive.phase import CognitivePhase, CognitivePhaseDetector
 
 __all__ = [
     "Metis",
@@ -79,5 +80,7 @@ __all__ = [
     "GenerationSample",
     "SemanticCluster",
     "InferenceResult",
+    "CognitivePhase",
+    "CognitivePhaseDetector",
     "__version__",
 ]

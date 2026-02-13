@@ -41,6 +41,12 @@ CUSUM_HEDGE_H = 8.0         # HEDGE threshold (~10 tokens of moderate uncertaint
 CUSUM_REFUSE_H = 15.0       # REFUSE threshold (extreme sustained uncertainty)
 CUSUM_DECAY = 0.85          # Decay factor on confident tokens (z < 0)
 
+# Surprise-based CUSUM boost (prediction error feedback)
+# When the model generates tokens it doesn't believe in (high surprise),
+# this accelerates the CUSUM independently of z-score.
+SURPRISE_BASELINE = 3.0     # bits; typical surprise for common tokens
+SURPRISE_WEIGHT = 0.15      # CUSUM contribution per excess surprise bit
+
 
 class EpistemicBoundaryGuard:
     """
@@ -78,6 +84,9 @@ class EpistemicBoundaryGuard:
         
         # CUSUM state: single statistic for sustained uncertainty
         self._cusum = 0.0
+        
+        # Surprise feedback (1-step lag from inference sampling)
+        self._last_surprise = 0.0
         
         # Action callback
         self._on_action = on_action
@@ -117,14 +126,21 @@ class EpistemicBoundaryGuard:
             return self._emit(EpistemicState.LIKELY, BoundaryAction.GENERATE, "")
         
         # ── CUSUM Update ──
-        # sd-weighted accumulation: genuine uncertainty accumulates fast,
-        # synonym choices accumulate slowly.
+        # Two independent contributions:
+        # 1. z-score * sd (distribution-level uncertainty)
+        # 2. surprise boost (token-level prediction error)
         if z > CUSUM_K:
             self._cusum += (z - CUSUM_K) * sd
         elif z < 0:
             # Confident token → decay accumulated uncertainty
             self._cusum *= CUSUM_DECAY
-        # z in [0, CUSUM_K): within normal variation, no change
+        # z in [0, CUSUM_K): within normal variation, no z-score change
+        
+        # Surprise boost: if last sampled token had high prediction error,
+        # accelerate CUSUM regardless of z-score.
+        # This catches hallucination where model confidently outputs wrong tokens.
+        if self._last_surprise > SURPRISE_BASELINE:
+            self._cusum += (self._last_surprise - SURPRISE_BASELINE) * SURPRISE_WEIGHT
         
         # ── Epistemic State (diagnostic, based on current z) ──
         if z > z_unk:
@@ -169,6 +185,14 @@ class EpistemicBoundaryGuard:
         
         return self._emit(state, BoundaryAction.GENERATE, "")
     
+    def feed_surprise(self, surprise: float) -> None:
+        """Feed back the sampled token's surprise for next step's CUSUM.
+        
+        Called from inference.py after each token sampling.
+        1-step lag: this surprise affects the NEXT evaluate() call.
+        """
+        self._last_surprise = surprise
+
     def get_uncertainty_score(self) -> float:
         """Get CUSUM-based uncertainty score (higher = more uncertain)"""
         return self._cusum
@@ -202,5 +226,6 @@ class EpistemicBoundaryGuard:
     def reset(self) -> None:
         """Reset (called at start of new conversation)"""
         self._cusum = 0.0
+        self._last_surprise = 0.0
         self._token_count = 0
         self._action_counts = {a: 0 for a in BoundaryAction}
