@@ -52,7 +52,7 @@ class RewardConfig:
     w_efficiency: float = 0.15
 
     # Coherence v2: windowed CV + entropy floor
-    coherence_cv_scale: float = 2.0       # Higher = stricter coherence
+    coherence_cv_scale: float = 0.5       # Reduced: 2.0 was over-penalizing DPO models
     coherence_window: int = 16            # Sliding window for local CV
     entropy_floor: float = 0.3            # Min mean entropy before penalty
     entropy_floor_penalty: float = 2.0    # Penalty scale for entropy collapse

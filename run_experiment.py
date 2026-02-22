@@ -74,36 +74,167 @@ class C:
 # ─────────────────────────────────────────────────────
 
 TRAIN_PROMPTS = [
+    # ── Fundamental Physics (20) ──
     "Explain quantum entanglement in simple terms.",
-    "What causes the northern lights?",
-    "How does a neural network learn?",
     "Why is the sky blue?",
     "What is the theory of relativity?",
-    "How do vaccines work?",
-    "Explain how a blockchain works.",
-    "What is dark matter?",
-    "How does photosynthesis convert sunlight to energy?",
-    "What causes earthquakes?",
-    "Explain the concept of entropy in thermodynamics.",
-    "How does CRISPR gene editing work?",
     "What is the standard model of particle physics?",
-    "How do black holes form?",
-    "Explain the difference between AI, ML, and deep learning.",
-    "What causes inflation in economics?",
-    "How does the immune system fight viruses?",
-    "What is quantum computing and why does it matter?",
-    "Explain how GPS works.",
-    "What is the greenhouse effect?",
-    "How does memory work in the human brain?",
-    "What is the significance of the Higgs boson?",
-    "Explain the water cycle.",
-    "How do antibiotics work?",
     "What is general relativity vs special relativity?",
-    "How does a transistor work?",
-    "What causes tides?",
-    "Explain the concept of natural selection.",
+    "Explain the concept of entropy in thermodynamics.",
+    "What is the significance of the Higgs boson?",
     "How does nuclear fusion produce energy?",
+    "What is wave-particle duality?",
+    "Explain the Heisenberg uncertainty principle.",
+    "What is superconductivity and how does it work?",
+    "How does a laser produce coherent light?",
+    "What is the photoelectric effect?",
+    "Explain the four fundamental forces of nature.",
+    "What is Hawking radiation?",
+    "How does quantum tunneling work?",
+    "What is the Casimir effect?",
+    "Explain the concept of symmetry breaking in physics.",
+    "What is the difference between bosons and fermions?",
+    "How does a particle accelerator work?",
+    # ── Astronomy & Cosmology (15) ──
+    "What is dark matter?",
+    "How do black holes form?",
+    "What causes the northern lights?",
+    "What causes tides?",
+    "What is dark energy and why is the universe expanding?",
+    "How do stars die?",
+    "What is a neutron star?",
+    "Explain the Big Bang theory.",
+    "What is cosmic microwave background radiation?",
+    "How do gravitational waves work?",
+    "What is a pulsar?",
+    "Explain the Drake equation.",
+    "What is the Fermi paradox?",
+    "How does a supernova differ from a hypernova?",
+    "What is the event horizon of a black hole?",
+    # ── Biology & Medicine (20) ──
+    "How do vaccines work?",
+    "How does CRISPR gene editing work?",
+    "How does the immune system fight viruses?",
+    "How do antibiotics work?",
     "What is the microbiome and why is it important?",
+    "How does photosynthesis convert sunlight to energy?",
+    "Explain the concept of natural selection.",
+    "How does DNA replication work?",
+    "What is epigenetics?",
+    "How do neurons communicate with each other?",
+    "What is the role of mitochondria in cellular energy?",
+    "How does the blood-brain barrier work?",
+    "What is apoptosis and why is it important?",
+    "How do prions cause disease?",
+    "Explain the difference between innate and adaptive immunity.",
+    "What is the central dogma of molecular biology?",
+    "How does antibiotic resistance develop?",
+    "What is the human genome project?",
+    "How do stem cells differentiate into specialized cells?",
+    "What is CRISPR-Cas13 and how does it differ from Cas9?",
+    # ── Earth Science & Climate (10) ──
+    "What causes earthquakes?",
+    "What is the greenhouse effect?",
+    "Explain the water cycle.",
+    "How does plate tectonics shape the Earth?",
+    "What causes volcanic eruptions?",
+    "How does ocean acidification affect marine life?",
+    "What is the ozone layer and why is it important?",
+    "How do ice ages occur?",
+    "What causes El Nino and La Nina?",
+    "How does the carbon cycle work?",
+    # ── Computer Science & AI (20) ──
+    "How does a neural network learn?",
+    "Explain how a blockchain works.",
+    "What is quantum computing and why does it matter?",
+    "Explain the difference between AI, ML, and deep learning.",
+    "How does a transformer architecture work?",
+    "What is the halting problem?",
+    "Explain the concept of P vs NP.",
+    "How does public-key cryptography work?",
+    "What is a Turing machine?",
+    "How does gradient descent optimize a loss function?",
+    "What is the vanishing gradient problem?",
+    "Explain the concept of attention in neural networks.",
+    "How does reinforcement learning differ from supervised learning?",
+    "What is a generative adversarial network?",
+    "Explain the concept of overfitting and regularization.",
+    "How does a convolutional neural network process images?",
+    "What is federated learning?",
+    "How does a hash function work?",
+    "What is the CAP theorem in distributed systems?",
+    "Explain the concept of backpropagation.",
+    # ── Engineering & Technology (15) ──
+    "How does a transistor work?",
+    "Explain how GPS works.",
+    "How does a nuclear reactor generate electricity?",
+    "What is the difference between AC and DC current?",
+    "How does fiber optic communication work?",
+    "What is a fuel cell and how does it work?",
+    "How does wireless charging work?",
+    "What is the principle behind MRI machines?",
+    "How does a jet engine produce thrust?",
+    "What is LIDAR and how does it work?",
+    "How does a semiconductor chip fabrication process work?",
+    "What is the difference between RAM and ROM?",
+    "How does a gyroscope maintain orientation?",
+    "What is piezoelectricity?",
+    "How does a solar panel convert light to electricity?",
+    # ── Mathematics & Logic (10) ──
+    "What is Godel's incompleteness theorem?",
+    "Explain the concept of infinity in mathematics.",
+    "What is the Monty Hall problem and why is it counterintuitive?",
+    "How does Bayesian inference work?",
+    "What is chaos theory?",
+    "Explain the concept of fractals.",
+    "What is the difference between correlation and causation?",
+    "How does the Fourier transform work?",
+    "What is game theory?",
+    "Explain the birthday paradox.",
+    # ── Economics & Social Science (10) ──
+    "What causes inflation in economics?",
+    "How does supply and demand determine prices?",
+    "What is the tragedy of the commons?",
+    "How does compound interest work?",
+    "What is behavioral economics?",
+    "Explain the concept of opportunity cost.",
+    "What is the difference between fiscal and monetary policy?",
+    "How does a stock market crash happen?",
+    "What is the prisoner's dilemma?",
+    "How does international trade affect currency exchange rates?",
+    # ── Psychology & Neuroscience (10) ──
+    "How does memory work in the human brain?",
+    "What is cognitive dissonance?",
+    "How does the placebo effect work?",
+    "What is neuroplasticity?",
+    "Explain the difference between short-term and long-term memory.",
+    "What is the Dunning-Kruger effect?",
+    "How does sleep affect memory consolidation?",
+    "What is confirmation bias?",
+    "How does the fight-or-flight response work?",
+    "What is the difference between emotions and feelings?",
+    # ── Philosophy & Epistemology (10) ──
+    "What is the ship of Theseus paradox?",
+    "Explain the trolley problem and its ethical implications.",
+    "What is the difference between deductive and inductive reasoning?",
+    "What is the Chinese room argument?",
+    "Explain the concept of falsifiability in science.",
+    "What is the problem of other minds?",
+    "How does Occam's razor apply to scientific theories?",
+    "What is the difference between knowledge and belief?",
+    "Explain the concept of emergence.",
+    "What is the measurement problem in quantum mechanics?",
+    # ── Chemistry (10) ──
+    "How do chemical bonds form?",
+    "What is the difference between organic and inorganic chemistry?",
+    "How does catalysis speed up chemical reactions?",
+    "What is a polymer and how is it synthesized?",
+    "Explain the concept of pH and acid-base chemistry.",
+    "How does electrochemistry work in batteries?",
+    "What is chirality in chemistry?",
+    "How does nuclear fission differ from fusion?",
+    "What are van der Waals forces?",
+    "Explain the concept of chemical equilibrium.",
 ]
 
 EVAL_PROMPTS = [
@@ -134,14 +265,14 @@ class ExperimentConfig:
     output_dir: str = "./experiment_output"
 
     # Generation
-    n_samples_per_prompt: int = 4       # Responses per prompt for GRPO
+    n_samples_per_prompt: int = 8       # More samples = better pair selection
     max_new_tokens: int = 200
     temperature: float = 0.7
 
     # Training
-    dpo_epochs: int = 1
-    dpo_learning_rate: float = 5e-7     # Conservative: prevent catastrophic forgetting
-    dpo_batch_size: int = 1              # Minimal for 8GB VRAM
+    dpo_epochs: int = 2
+    dpo_learning_rate: float = 1e-6     # Moderate: enough signal to cross KL barrier
+    dpo_batch_size: int = 2              # Effective batch = 16 with accum=8
     dpo_beta: float = 0.2               # Higher beta = stronger KL constraint vs reference
     dpo_max_length: int = 384
     gradient_checkpointing: bool = True
@@ -152,10 +283,10 @@ class ExperimentConfig:
 
     # Evaluation
     eval_max_tokens: int = 200
-    eval_temperature: float = 0.3        # Lower temp for more deterministic eval
+    eval_temperature: float = 0.7        # Match generation temp to prevent base model degeneration
 
     # Prompts
-    n_train_prompts: int = 20            # How many train prompts to use
+    n_train_prompts: int = 150           # Scaled up for statistical power
     n_eval_prompts: int = 15
 
 
@@ -771,15 +902,15 @@ def main():
                         help="Device: cuda / cpu / auto")
     parser.add_argument("--output", type=str, default="./experiment_output",
                         help="Output directory")
-    parser.add_argument("--n-prompts", type=int, default=20,
+    parser.add_argument("--n-prompts", type=int, default=150,
                         help="Number of training prompts")
-    parser.add_argument("--n-samples", type=int, default=4,
+    parser.add_argument("--n-samples", type=int, default=8,
                         help="Samples per prompt")
     parser.add_argument("--max-tokens", type=int, default=200,
                         help="Max new tokens per generation")
-    parser.add_argument("--dpo-epochs", type=int, default=1,
+    parser.add_argument("--dpo-epochs", type=int, default=2,
                         help="DPO training epochs")
-    parser.add_argument("--dpo-lr", type=float, default=5e-6,
+    parser.add_argument("--dpo-lr", type=float, default=1e-6,
                         help="DPO learning rate")
     parser.add_argument("--lora-r", type=int, default=16,
                         help="LoRA rank")
