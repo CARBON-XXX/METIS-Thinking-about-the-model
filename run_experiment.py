@@ -140,12 +140,12 @@ class ExperimentConfig:
 
     # Training
     dpo_epochs: int = 1
-    dpo_learning_rate: float = 5e-6
-    dpo_batch_size: int = 2
-    dpo_beta: float = 0.1               # DPO beta (KL penalty)
+    dpo_learning_rate: float = 5e-7     # Conservative: prevent catastrophic forgetting
+    dpo_batch_size: int = 1              # Minimal for 8GB VRAM
+    dpo_beta: float = 0.2               # Higher beta = stronger KL constraint vs reference
     dpo_max_length: int = 384
     gradient_checkpointing: bool = True
-    dpo_gradient_accumulation: int = 4
+    dpo_gradient_accumulation: int = 8   # Effective batch = 8
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
@@ -172,6 +172,9 @@ class EvalMetrics:
     reward_phase_quality: float = 0.0
     reward_epistemic: float = 0.0
     reward_efficiency: float = 0.0
+
+    # Per-prompt reward list (for statistical tests)
+    per_prompt_rewards: List[float] = field(default_factory=list)
 
     # Raw signal metrics
     mean_entropy: float = 0.0
@@ -333,7 +336,14 @@ def phase2_train(
 
 
 def _build_metis_pairs(scored_data: List[Dict]) -> List[Dict]:
-    """Build DPO pairs ranked by METIS cognitive reward."""
+    """Build DPO pairs ranked by METIS cognitive reward (length-debiased).
+
+    Key design decisions:
+    - Sort by cognitive reward EXCLUDING length penalty to prevent
+      the model from learning "shorter is better" spurious correlation
+    - Require chosen/rejected to have comparable token counts (within 50%)
+      to isolate cognitive quality from verbosity differences
+    """
     # Group by prompt
     by_prompt: Dict[str, List[Dict]] = {}
     for entry in scored_data:
@@ -344,10 +354,26 @@ def _build_metis_pairs(scored_data: List[Dict]) -> List[Dict]:
 
     pairs = []
     for prompt, samples in by_prompt.items():
-        # Sort by reward (descending)
+        # Sort by cognitive reward (total already excludes length penalty
+        # in v2, but we use reward_breakdown if available for safety)
         samples.sort(key=lambda x: x["reward_total"], reverse=True)
+
+        # Try to find a valid pair with comparable lengths
         best = samples[0]
-        worst = samples[-1]
+        worst = None
+        for candidate in reversed(samples):
+            if candidate is best:
+                continue
+            # Length comparability: neither is >50% longer than the other
+            len_best = len(best["response"])
+            len_cand = len(candidate["response"])
+            ratio = max(len_best, len_cand) / max(min(len_best, len_cand), 1)
+            if ratio <= 1.5:
+                worst = candidate
+                break
+
+        if worst is None:
+            worst = samples[-1]  # Fallback to most different
 
         margin = best["reward_total"] - worst["reward_total"]
         if margin < 0.05:
@@ -558,6 +584,9 @@ def _evaluate_model(
             f"resp={text[:50]}..."
         )
 
+    # Store per-prompt rewards for statistical tests
+    metrics.per_prompt_rewards = total_rewards
+
     # Average all metrics
     n_prompts = len(prompts)
     metrics.reward_total = sum(total_rewards) / n_prompts
@@ -651,12 +680,66 @@ def phase4_report(
     print(f"    Random DPO vs Base:   {delta(random_ctrl.reward_total, base.reward_total)}")
     print(f"    METIS DPO vs Random:  {delta(metis.reward_total, random_ctrl.reward_total)}")
 
-    if metis_lift > random_lift + 0.01:
-        print(f"\n    {C.GREEN}{C.BOLD}✓ METIS cognitive rewards provide measurable training improvement{C.RESET}")
-    elif metis_lift > random_lift:
-        print(f"\n    {C.YELLOW}≈ Marginal improvement from METIS rewards (need more data){C.RESET}")
+    # ─── Statistical Analysis ───
+    print(f"\n{C.BOLD}  Statistical Analysis:{C.RESET}")
+
+    metis_rewards = metis.per_prompt_rewards
+    random_rewards = random_ctrl.per_prompt_rewards
+    base_rewards = base.per_prompt_rewards
+
+    if len(metis_rewards) >= 5 and len(random_rewards) >= 5:
+        # Paired bootstrap CI for METIS vs Random
+        n_boot = 10000
+        rng = random.Random(42)
+        n_eval = min(len(metis_rewards), len(random_rewards))
+        diffs = [metis_rewards[i] - random_rewards[i] for i in range(n_eval)]
+        boot_means = []
+        for _ in range(n_boot):
+            sample = [diffs[rng.randint(0, n_eval - 1)] for _ in range(n_eval)]
+            boot_means.append(sum(sample) / n_eval)
+        boot_means.sort()
+        ci_lo = boot_means[int(0.025 * n_boot)]
+        ci_hi = boot_means[int(0.975 * n_boot)]
+        mean_diff = sum(diffs) / n_eval
+
+        # Cohen's d (paired)
+        if n_eval > 1:
+            diff_var = sum((d - mean_diff) ** 2 for d in diffs) / (n_eval - 1)
+            diff_std = math.sqrt(diff_var) if diff_var > 0 else 1e-6
+            cohens_d = mean_diff / diff_std
+        else:
+            cohens_d = 0.0
+
+        ci_color = C.GREEN if ci_lo > 0 else (C.RED if ci_hi < 0 else C.YELLOW)
+        print(f"    METIS vs Random (paired, n={n_eval}):")
+        print(f"      Mean Δ:       {ci_color}{mean_diff:+.4f}{C.RESET}")
+        print(f"      95% Boot CI:  {ci_color}[{ci_lo:+.4f}, {ci_hi:+.4f}]{C.RESET}")
+        print(f"      Cohen's d:    {cohens_d:+.3f}", end="")
+        if abs(cohens_d) >= 0.8:
+            print(f" {C.GREEN}(large){C.RESET}")
+        elif abs(cohens_d) >= 0.5:
+            print(f" {C.YELLOW}(medium){C.RESET}")
+        elif abs(cohens_d) >= 0.2:
+            print(f" {C.YELLOW}(small){C.RESET}")
+        else:
+            print(f" {C.DIM}(negligible){C.RESET}")
+
+        sig = ci_lo > 0 or ci_hi < 0
+        if sig and mean_diff > 0:
+            print(f"\n    {C.GREEN}{C.BOLD}✓ METIS improvement is statistically significant (CI excludes 0){C.RESET}")
+        elif not sig:
+            print(f"\n    {C.YELLOW}⚠ Result not statistically significant (CI includes 0, need more data){C.RESET}")
+        else:
+            print(f"\n    {C.RED}✗ METIS underperforms Random (CI excludes 0){C.RESET}")
     else:
-        print(f"\n    {C.RED}✗ No clear improvement (may need hyperparameter tuning){C.RESET}")
+        print(f"    {C.DIM}Too few samples for statistical tests (n<5){C.RESET}")
+
+    if metis_lift > random_lift + 0.01:
+        print(f"    {C.GREEN}{C.BOLD}✓ METIS cognitive rewards provide measurable training improvement{C.RESET}")
+    elif metis_lift > random_lift:
+        print(f"    {C.YELLOW}≈ Marginal improvement from METIS rewards (need more data){C.RESET}")
+    else:
+        print(f"    {C.RED}✗ No clear improvement (may need hyperparameter tuning){C.RESET}")
 
     # Save report
     report = {

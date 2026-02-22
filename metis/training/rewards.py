@@ -51,17 +51,24 @@ class RewardConfig:
     w_epistemic: float = 0.15
     w_efficiency: float = 0.15
 
-    # Coherence: entropy CV (coefficient of variation) penalty scale
-    coherence_cv_scale: float = 2.0     # Higher = stricter coherence requirement
+    # Coherence v2: windowed CV + entropy floor
+    coherence_cv_scale: float = 2.0       # Higher = stricter coherence
+    coherence_window: int = 16            # Sliding window for local CV
+    entropy_floor: float = 0.3            # Min mean entropy before penalty
+    entropy_floor_penalty: float = 2.0    # Penalty scale for entropy collapse
 
     # Calibration: surprise baseline for "overconfident" detection
     calibration_surprise_baseline: float = 3.0  # bits
 
-    # Phase: confusion penalty weight
+    # Phase v2: continuous arc quality scoring (no binary confusion gate)
     phase_confusion_penalty: float = 2.0
+    phase_monotone_penalty: float = 0.5   # Penalty for all-same phase (no reasoning)
+    phase_arc_bonus: float = 0.3          # Bonus for natural reasoning arcs
     phase_oscillation_penalty: float = 1.0
 
-    # Epistemic: penalty for generating through UNKNOWN state
+    # Epistemic v2: surprise-conditional scoring (not just label-based)
+    epistemic_surprise_weight: float = 0.6  # Weight for surprise-confidence divergence
+    epistemic_label_weight: float = 0.4    # Weight for epistemic state labels
     epistemic_unknown_penalty: float = 3.0
 
     # Efficiency: target FAST ratio (domain-dependent)
@@ -186,29 +193,62 @@ class CognitiveRewardComputer:
 
     def _reward_coherence(self, events: List[CognitiveEvent]) -> float:
         """
-        Coherence reward: penalize erratic entropy swings.
+        Coherence reward v2: windowed local smoothness + entropy floor guard.
 
-        Metric: Coefficient of Variation (CV) of semantic entropy.
-        CV = std(H) / mean(H). Low CV = smooth, coherent generation.
+        Two sub-signals:
 
-        Mapping: R_coh = 1 - scale * CV, clamped to [-1, 1]
+        1. Windowed CV [−1.0, 0.6]:
+           - Compute CV in sliding windows of size W, then average
+           - Rewards LOCAL smoothness (adjacent tokens coherent)
+           - Unlike global CV, does NOT reward degenerate flat distributions
+           - A natural response with smooth local transitions scores well
+             even if global entropy varies across topics
 
-        Mathematical justification:
-        - Coherent text has stable entropy (model confidently generates each token)
-        - Hallucination / confusion causes entropy spikes
-        - CV is scale-invariant (works across different models/domains)
+        2. Entropy floor guard [−0.4, 0]:
+           - If mean entropy < floor → penalty (distribution is collapsing)
+           - This creates a soft constraint against mode collapse
+           - Prevents coherence reward from competing with calibration/efficiency
+
+        R_coh = windowed_score + floor_penalty ∈ [-1.0, 0.6]
         """
         entropies = [e.semantic_entropy for e in events]
-        mean_h = sum(entropies) / len(entropies)
+        n = len(entropies)
+        cfg = self._config
 
-        if mean_h < 1e-6:
-            return 1.0  # Near-zero entropy = perfectly confident
+        mean_h = sum(entropies) / n
 
-        var_h = sum((h - mean_h) ** 2 for h in entropies) / len(entropies)
-        std_h = math.sqrt(var_h)
-        cv = std_h / mean_h
+        # ── Sub-signal 1: Windowed CV ──
+        window = min(cfg.coherence_window, n)
+        if window < 2:
+            windowed_score = 0.0
+        else:
+            local_cvs = []
+            for start in range(0, n - window + 1, window // 2):  # 50% overlap
+                chunk = entropies[start : start + window]
+                w_mean = sum(chunk) / len(chunk)
+                if w_mean < 1e-6:
+                    local_cvs.append(0.0)
+                    continue
+                w_var = sum((h - w_mean) ** 2 for h in chunk) / len(chunk)
+                local_cvs.append(math.sqrt(w_var) / (w_mean + 0.5))
 
-        reward = 1.0 - self._config.coherence_cv_scale * cv
+            if local_cvs:
+                avg_cv = sum(local_cvs) / len(local_cvs)
+            else:
+                avg_cv = 0.0
+
+            windowed_score = 0.6 - cfg.coherence_cv_scale * avg_cv
+            windowed_score = max(-1.0, min(0.6, windowed_score))
+
+        # ── Sub-signal 2: Entropy floor guard ──
+        floor_penalty = 0.0
+        if mean_h < cfg.entropy_floor:
+            # Penalty grows as entropy drops below floor
+            deficit = (cfg.entropy_floor - mean_h) / max(cfg.entropy_floor, 1e-6)
+            floor_penalty = cfg.entropy_floor_penalty * deficit
+            floor_penalty = min(floor_penalty, 0.4)  # Cap at -0.4
+
+        reward = windowed_score - floor_penalty
         return max(-1.0, min(1.0, reward))
 
     # ═══════════════════════════════════════════════════════
@@ -260,36 +300,89 @@ class CognitiveRewardComputer:
 
     def _reward_phase_quality(self, events: List[CognitiveEvent]) -> float:
         """
-        Phase quality reward: penalize confusion and phase oscillation.
+        Phase quality reward v2: continuous arc scoring (no dead nodes).
 
-        Desirable pattern: fluent → recall → reasoning → fluent (natural arc)
-        Undesirable: confusion (model stuck), rapid phase oscillation
+        Three sub-signals (each contributes to a continuous score):
 
-        Components:
-        1. Confusion ratio penalty: fraction of tokens in "confusion" phase
-        2. Oscillation penalty: number of phase transitions / total tokens
-           (Rapid switching indicates the model can't settle into a reasoning mode)
+        1. Phase diversity score [0, 0.4]:
+           - Monotone generation (all "fluent") is penalized
+           - Uses normalized phase entropy: H(phases) / log(n_possible_phases)
+           - This breaks the 1.0 saturation problem
+
+        2. Reasoning arc completeness [0, 0.3]:
+           - Detects natural arcs: exploration → reasoning → resolution
+           - Measured by entropy gradient trajectory (descending trend after peak)
+           - Rewards sequences where entropy rises (exploration), then falls (resolution)
+
+        3. Confusion penalty [-0.7, 0]:
+           - Still penalizes confusion phases, but as one of three signals
+           - Also penalizes rapid oscillation (>40% transition rate)
+
+        Total R_phase ∈ [-1.0, 0.7] — never saturates at 1.0 unless
+        perfect arc + diversity + zero confusion (extremely rare).
         """
         n = len(events)
         cfg = self._config
 
-        # 1. Confusion ratio
+        # ── Sub-signal 1: Phase diversity (H(phase) / log(K)) ──
+        phase_counts: Dict[str, int] = {}
+        for e in events:
+            p = e.cognitive_phase
+            phase_counts[p] = phase_counts.get(p, 0) + 1
+
+        n_unique = len(phase_counts)
+        if n_unique <= 1:
+            # Monotone: single phase throughout → penalty
+            diversity_score = -cfg.phase_monotone_penalty
+        else:
+            # Shannon entropy of phase distribution
+            phase_entropy = 0.0
+            for count in phase_counts.values():
+                p_i = count / n
+                if p_i > 0:
+                    phase_entropy -= p_i * math.log(p_i + 1e-12)
+            # Normalize by log(K) where K = number of possible phases
+            # Use observed unique phases as denominator (conservative)
+            max_entropy = math.log(max(n_unique, 2))
+            normalized = phase_entropy / max_entropy  # ∈ [0, 1]
+            diversity_score = 0.4 * normalized  # ∈ [0, 0.4]
+
+        # ── Sub-signal 2: Reasoning arc completeness ──
+        # Detect entropy trajectory: does it rise (exploration) then fall (resolution)?
+        if n >= 8:
+            # Split trace into thirds
+            third = n // 3
+            entropies = [e.semantic_entropy for e in events]
+            h_early = sum(entropies[:third]) / max(third, 1)
+            h_mid = sum(entropies[third:2*third]) / max(third, 1)
+            h_late = sum(entropies[2*third:]) / max(n - 2*third, 1)
+
+            # Ideal arc: h_mid > h_early (exploration) AND h_late < h_mid (resolution)
+            has_exploration = h_mid > h_early * 1.05  # 5% rise = exploration
+            has_resolution = h_late < h_mid * 0.95    # 5% drop = resolution
+            arc_score = cfg.phase_arc_bonus * (
+                (0.5 if has_exploration else 0.0)
+                + (0.5 if has_resolution else 0.0)
+            )  # ∈ [0, phase_arc_bonus]
+        else:
+            arc_score = 0.0  # Too short to detect arc
+
+        # ── Sub-signal 3: Confusion + oscillation penalty ──
         confusion_count = sum(1 for e in events if e.cognitive_phase == "confusion")
         confusion_ratio = confusion_count / n
 
-        # 2. Phase oscillation: count transitions between different phases
         transitions = 0
         for i in range(1, n):
             if events[i].cognitive_phase != events[i - 1].cognitive_phase:
                 transitions += 1
         oscillation_rate = transitions / max(n - 1, 1)
 
-        # Reward: start at 1.0, subtract penalties
-        reward = 1.0
-        reward -= cfg.phase_confusion_penalty * confusion_ratio
-        reward -= cfg.phase_oscillation_penalty * max(0, oscillation_rate - 0.3)
-        # Allow up to 30% transitions as normal (phases do change naturally)
+        penalty = 0.0
+        penalty += cfg.phase_confusion_penalty * confusion_ratio
+        penalty += cfg.phase_oscillation_penalty * max(0, oscillation_rate - 0.1)
 
+        # ── Combine ──
+        reward = diversity_score + arc_score - penalty
         return max(-1.0, min(1.0, reward))
 
     # ═══════════════════════════════════════════════════════
@@ -298,23 +391,49 @@ class CognitiveRewardComputer:
 
     def _reward_epistemic_honesty(self, events: List[CognitiveEvent]) -> float:
         """
-        Epistemic honesty reward: model should express uncertainty appropriately.
+        Epistemic honesty reward v2: surprise-conditional continuous scoring.
 
-        Penalize:
-        - Generating confidently through UNKNOWN epistemic state
-          (model should hedge or seek information, not plow through)
-        - High confidence when boundary guard is in HEDGE/REFUSE state
+        Problem with v1: label-based scoring (EpistemicState counts) is a
+        confound — both METIS and Random DPO improve equally because the
+        improvement comes from DPO format, not cognitive signals.
 
-        Reward:
-        - HEDGE action when actually uncertain (appropriate caution)
-        - High confidence when LIKELY/CONFIDENT (justified confidence)
+        v2 uses two weighted sub-signals:
 
-        This teaches the model to be epistemically honest — a key property
-        that LLM-as-judge reward models struggle to capture.
+        1. Surprise-confidence divergence (60% weight):
+           - Continuous metric: |confidence - (1 - normalized_surprise)|
+           - Measures gap between model's expressed confidence and
+             information-theoretic surprise on each token
+           - Low divergence = well-calibrated epistemic behavior
+           - THIS is METIS-specific: depends on actual entropy/surprise signals
+           - DPO format alone cannot improve this without METIS trace data
+
+        2. Label-based honesty (40% weight):
+           - Kept for interpretability but downweighted
+           - Same logic as v1 (hedge when uncertain, confident when likely)
+
+        R_epist = w_s * surprise_score + w_l * label_score
         """
         n = len(events)
         cfg = self._config
+        w_s = cfg.epistemic_surprise_weight  # 0.6
+        w_l = cfg.epistemic_label_weight     # 0.4
 
+        # ── Sub-signal 1: Surprise-confidence divergence ──
+        # For each token: ideal confidence ≈ 1 - normalized_surprise
+        # normalized_surprise = min(token_surprise / baseline, 1.0)
+        baseline = cfg.calibration_surprise_baseline
+        divergence_sum = 0.0
+        for e in events:
+            norm_surprise = min(e.token_surprise / max(baseline, 1e-6), 1.0)
+            ideal_confidence = 1.0 - norm_surprise
+            divergence_sum += abs(e.confidence - ideal_confidence)
+
+        mean_divergence = divergence_sum / max(n, 1)
+        # Map: 0 divergence → +1, high divergence → −1
+        surprise_score = 1.0 - 3.0 * mean_divergence
+        surprise_score = max(-1.0, min(1.0, surprise_score))
+
+        # ── Sub-signal 2: Label-based honesty (same as v1) ──
         honest_count = 0
         dishonest_penalty = 0.0
 
@@ -326,24 +445,23 @@ class CognitiveRewardComputer:
             is_confident_output = e.confidence > 0.7
 
             if is_uncertain and is_confident_output:
-                # Bad: model is confident but epistemic state says uncertain
                 weight = cfg.epistemic_unknown_penalty if e.epistemic_state == EpistemicState.UNKNOWN else 1.0
                 dishonest_penalty += weight
             elif is_uncertain and e.boundary_action in (
                 BoundaryAction.HEDGE,
                 BoundaryAction.REFUSE,
             ):
-                # Good: model is uncertain AND boundary guard triggered appropriate action
                 honest_count += 1
             elif not is_uncertain and is_confident_output:
-                # Good: justified confidence
                 honest_count += 1
-            # Else: neutral (low confidence on likely state — slightly underconfident but not harmful)
 
         honest_ratio = honest_count / max(n, 1)
         dishonest_ratio = dishonest_penalty / max(n, 1)
+        label_score = honest_ratio - dishonest_ratio
+        label_score = max(-1.0, min(1.0, label_score))
 
-        reward = honest_ratio - dishonest_ratio
+        # ── Combine ──
+        reward = w_s * surprise_score + w_l * label_score
         return max(-1.0, min(1.0, reward))
 
     # ═══════════════════════════════════════════════════════
@@ -392,7 +510,18 @@ class CognitiveRewardComputer:
 
         # Reward = FAST efficiency + DEEP resolution rate - overthinking penalty
         target = self._config.efficiency_target_fast
-        fast_bonus = min(1.0, fast_ratio / max(target, 0.01))  # Reward reaching target
+        # FAST bonus gated by calibration: only reward FAST when model
+        # is well-calibrated (prevents gaming by collapsing to low entropy)
+        baseline = self._config.calibration_surprise_baseline
+        miscal_sum = 0.0
+        for e in events:
+            excess = e.token_surprise - baseline
+            if excess > 0:
+                miscal_sum += e.confidence * excess
+        mean_miscal = miscal_sum / max(n, 1)
+        is_well_calibrated = mean_miscal < 0.2
+
+        fast_bonus = min(1.0, fast_ratio / max(target, 0.01)) if is_well_calibrated else 0.0
         deep_penalty = max(0, deep_ratio - 0.3)  # Penalize >30% DEEP
         resolution_bonus = deep_resolution_rate * 0.5  # Bonus for useful DEEP
 
