@@ -296,8 +296,14 @@ class Metis:
         return self._se_estimator
     
     def feed_surprise(self, surprise: float) -> None:
-        """Feed token surprise back to boundary guard (1-step lag feedback)."""
+        """Feed token surprise back to boundary guard and update trace (1-step lag feedback)."""
         self._boundary.feed_surprise(surprise)
+        # Back-fill surprise into the last signal and trace event
+        # (surprise is computed AFTER step() returns, so we patch retroactively)
+        if self._last_signal is not None:
+            self._last_signal.token_surprise = surprise
+        if self._trace is not None and self._trace.events:
+            self._trace.events[-1].token_surprise = surprise
 
     def get_uncertainty_score(self) -> float:
         """Get boundary guard's accumulated uncertainty score"""

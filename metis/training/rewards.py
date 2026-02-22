@@ -140,6 +140,19 @@ class CognitiveRewardComputer:
         if len(events) < 2:
             return RewardBreakdown(diagnostics={"error": "too_few_events"})
 
+        # Degeneration guard: if entropy has near-zero variance AND mean
+        # confidence is extremely high, output is likely degenerate
+        # (e.g., "TheTheThe..." repeated tokens)
+        entropies = [e.semantic_entropy for e in events]
+        mean_h = sum(entropies) / len(entropies)
+        var_h = sum((h - mean_h) ** 2 for h in entropies) / len(entropies)
+        decisions = set(e.decision for e in events)
+        if var_h < 0.001 and len(decisions) <= 1:
+            return RewardBreakdown(
+                total=-1.0, coherence=-1.0,
+                diagnostics={"degenerate": 1.0, "entropy_var": var_h},
+            )
+
         cfg = self._config
         breakdown = RewardBreakdown()
 

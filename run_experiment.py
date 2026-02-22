@@ -129,7 +129,7 @@ EVAL_PROMPTS = [
 @dataclass
 class ExperimentConfig:
     """Full experiment configuration."""
-    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
     device: str = "auto"
     output_dir: str = "./experiment_output"
 
@@ -143,7 +143,8 @@ class ExperimentConfig:
     dpo_learning_rate: float = 5e-6
     dpo_batch_size: int = 2
     dpo_beta: float = 0.1               # DPO beta (KL penalty)
-    dpo_max_length: int = 512
+    dpo_max_length: int = 384
+    gradient_checkpointing: bool = True
     dpo_gradient_accumulation: int = 4
     lora_r: int = 16
     lora_alpha: int = 32
@@ -394,15 +395,14 @@ def _train_dpo(
     pairs: List[Dict],
     output_path: str,
 ) -> None:
-    """Run DPO training with LoRA."""
+    """Run DPO training with LoRA (no deepcopy — saves VRAM for 8GB GPUs)."""
     from peft import LoraConfig, get_peft_model, TaskType
     from trl import DPOTrainer, DPOConfig
     from datasets import Dataset
-    import copy
 
     dataset = Dataset.from_list(pairs)
 
-    # Fresh LoRA adapter on base model
+    # Attach LoRA adapter directly to base model (no deepcopy to save VRAM)
     lora_config = LoraConfig(
         r=config.lora_r,
         lora_alpha=config.lora_alpha,
@@ -411,9 +411,7 @@ def _train_dpo(
         target_modules=["q_proj", "v_proj"],
     )
 
-    # Deep copy base model for independent training
-    train_model = copy.deepcopy(base_model)
-    train_model = get_peft_model(train_model, lora_config)
+    train_model = get_peft_model(base_model, lora_config)
     train_model.print_trainable_parameters()
 
     training_args = DPOConfig(
@@ -429,6 +427,7 @@ def _train_dpo(
         save_strategy="epoch",
         remove_unused_columns=False,
         bf16=torch.cuda.is_available(),
+        gradient_checkpointing=config.gradient_checkpointing,
         report_to="none",
     )
 
@@ -443,8 +442,9 @@ def _train_dpo(
     trainer.save_model(output_path)
     logger.info(f"Saved checkpoint to {output_path}")
 
-    # Cleanup
-    del train_model, trainer
+    # Detach LoRA adapter, restore base model for next training run
+    del trainer
+    train_model.unload()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
