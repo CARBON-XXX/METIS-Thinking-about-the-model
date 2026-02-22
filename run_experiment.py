@@ -37,6 +37,7 @@ import json
 import logging
 import math
 import os
+import gc
 import random
 import sys
 import time
@@ -398,6 +399,12 @@ def phase1_generate(
                 f"tokens={trace.total_tokens} "
                 f"resp={text[:60]}..."
             )
+
+        # Force VRAM garbage collection after each prompt
+        # Prevents PCIe Unified Memory fallback on 8GB GPUs
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # Save raw data
     os.makedirs(config.output_dir, exist_ok=True)

@@ -186,6 +186,11 @@ class MetisGenerator:
             if token_id == self._tokenizer.eos_token_id:
                 break
 
+        # Explicitly release GPU tensors before decode
+        del past_key_values, logits, outputs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         # Decode
         generated_text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
 
