@@ -170,8 +170,15 @@ class CognitiveRewardComputer:
         breakdown.epistemic_honesty = self._reward_epistemic_honesty(events)
         breakdown.efficiency = self._reward_efficiency(events, trace)
 
-        # Length penalty
+        # Completeness bonus: reward detailed, high-quality responses
+        # Prevents "silence is gold" gaming where model outputs EOS early
         n = len(events)
+        completeness_bonus = 0.0
+        if n > 30 and breakdown.coherence > 0 and breakdown.calibration > 0:
+            completeness_bonus = min(0.25, (n - 30) * 0.005)
+            breakdown.diagnostics["completeness_bonus"] = round(completeness_bonus, 4)
+
+        # Length penalty (extreme length only)
         if n > cfg.length_penalty_threshold:
             breakdown.length_penalty = (n - cfg.length_penalty_threshold) * cfg.length_penalty_scale
 
@@ -182,6 +189,7 @@ class CognitiveRewardComputer:
             + cfg.w_phase * breakdown.phase_quality
             + cfg.w_epistemic * breakdown.epistemic_honesty
             + cfg.w_efficiency * breakdown.efficiency
+            + completeness_bonus
             - breakdown.length_penalty
         )
 
@@ -230,7 +238,7 @@ class CognitiveRewardComputer:
                     local_cvs.append(0.0)
                     continue
                 w_var = sum((h - w_mean) ** 2 for h in chunk) / len(chunk)
-                local_cvs.append(math.sqrt(w_var) / (w_mean + 0.5))
+                local_cvs.append(math.sqrt(w_var) / w_mean)
 
             if local_cvs:
                 avg_cv = sum(local_cvs) / len(local_cvs)
@@ -379,7 +387,7 @@ class CognitiveRewardComputer:
 
         penalty = 0.0
         penalty += cfg.phase_confusion_penalty * confusion_ratio
-        penalty += cfg.phase_oscillation_penalty * max(0, oscillation_rate - 0.1)
+        penalty += cfg.phase_oscillation_penalty * max(0, oscillation_rate - 0.4)
 
         # ── Combine ──
         reward = diversity_score + arc_score - penalty
@@ -525,5 +533,9 @@ class CognitiveRewardComputer:
         deep_penalty = max(0, deep_ratio - 0.3)  # Penalize >30% DEEP
         resolution_bonus = deep_resolution_rate * 0.5  # Bonus for useful DEEP
 
-        reward = 0.5 * fast_bonus + resolution_bonus - deep_penalty
+        # Length factor: prevent "short talk" gaming
+        # If fewer than 40 events, scale down positive rewards proportionally
+        # This blocks the exploit where 10 FAST tokens → high efficiency score
+        length_factor = min(1.0, n / 40.0)
+        reward = (0.5 * fast_bonus + resolution_bonus) * length_factor - deep_penalty
         return max(-1.0, min(1.0, reward))
