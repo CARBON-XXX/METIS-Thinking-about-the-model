@@ -41,7 +41,7 @@ class CognitivePhaseDetector:
     Design: O(1) per step (maintains running sums, not full window scan).
     """
 
-    WINDOW = 8  # Classification window size
+    WINDOW = 4  # Classification window size (was 8 — too large for short gen)
 
     def __init__(self):
         self._buf: deque = deque(maxlen=self.WINDOW)
@@ -91,10 +91,10 @@ class CognitivePhaseDetector:
         # ── Phase classification (priority order) ──
         prev_phase = self._phase
 
-        if h_rel > 0.5 and w_diversity < 0.40 and w_momentum >= 0.0:
+        if h_rel > 0.5 and w_diversity < 0.60 and w_momentum >= 0.0:
             # Elevated entropy + low diversity + non-decreasing entropy = stuck
             new_phase = CognitivePhase.CONFUSION
-        elif h_rel > 0.5 and w_diversity >= 0.40:
+        elif h_rel > 0.5 and w_diversity >= 0.60:
             # High entropy + high diversity = searching for answer
             new_phase = CognitivePhase.EXPLORATION
         elif w_deep_ratio > 0.3 or (h_rel > 0.3 and h_rel <= 0.8):

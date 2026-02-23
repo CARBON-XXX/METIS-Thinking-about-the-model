@@ -14,10 +14,10 @@ from typing import Tuple, Optional, Callable, Dict, Any
 from ..core.types import EpistemicState, BoundaryAction, CognitiveSignal
 
 # ── Constants ──
-Z_UNCERTAIN_DEFAULT = 1.0       # z > 1.0 → UNCERTAIN
-Z_UNKNOWN_DEFAULT = 1.5         # z > 1.5 → UNKNOWN (lowered from 2.0)
+Z_UNCERTAIN_DEFAULT = 0.8       # z > 0.8 → UNCERTAIN (lowered for short sequences)
+Z_UNKNOWN_DEFAULT = 1.2         # z > 1.2 → UNKNOWN (lowered for short sequences)
 Z_KNOWN_DEFAULT = -0.5          # z < -0.5 → KNOWN
-MIN_WARMUP_TOKENS = 20          # Cold-start token count
+MIN_WARMUP_TOKENS = 4           # Cold-start cognitive events (was 20 — too large for short gen)
 
 CONFIDENCE_REFUSE = 0.3         # c < 0.3 → REFUSE (extreme uncertainty)
 CONFIDENCE_SEEK = 0.7           # c < 0.7 → SEEK (high uncertainty)
@@ -36,16 +36,16 @@ CONFIDENCE_KNOWN = 0.7          # c > 0.7 → KNOWN (when low z)
 #   - Gradual forgetting, not hard reset → tolerates brief confident interjections
 #
 # After triggering (HEDGE/REFUSE): S(t) = 0 (reset, ready for next detection)
-CUSUM_K = 0.5               # Allowance: z < 0.5 absorbed as normal variation
-CUSUM_HEDGE_H = 8.0         # HEDGE threshold (~10 tokens of moderate uncertainty)
-CUSUM_REFUSE_H = 15.0       # REFUSE threshold (extreme sustained uncertainty)
-CUSUM_DECAY = 0.85          # Decay factor on confident tokens (z < 0)
+CUSUM_K = 0.3               # Allowance: z < 0.3 absorbed as normal variation
+CUSUM_HEDGE_H = 2.0         # HEDGE threshold (~5 tokens of moderate uncertainty)
+CUSUM_REFUSE_H = 5.0        # REFUSE threshold (sustained high uncertainty)
+CUSUM_DECAY = 0.92          # Decay factor on confident tokens (slower forgetting)
 
 # Surprise-based CUSUM boost (prediction error feedback)
 # When the model generates tokens it doesn't believe in (high surprise),
 # this accelerates the CUSUM independently of z-score.
-SURPRISE_BASELINE = 3.0     # bits; typical surprise for common tokens
-SURPRISE_WEIGHT = 0.15      # CUSUM contribution per excess surprise bit
+SURPRISE_BASELINE = 1.5     # bits; lowered to catch more prediction errors
+SURPRISE_WEIGHT = 0.25      # CUSUM contribution per excess surprise bit
 
 
 class EpistemicBoundaryGuard:
