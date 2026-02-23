@@ -1031,11 +1031,13 @@ def _evaluate_model(
         # ── Wall-clock circuit breaker ──
         # Prevents single-prompt pathological loops from blocking the entire eval
         result_container: list = []
+        # Capture generator in local var for thread-safety
+        gen_ref = generator
 
-        def _generate_with_timeout():
+        def _generate_with_timeout(g=gen_ref, p=chat_prompt):
             try:
-                samples = generator.generate_batch(
-                    chat_prompt,
+                samples = g.generate_batch(
+                    p,
                     n_samples=1,
                     temperatures=[config.eval_temperature],
                     max_new_tokens=config.eval_max_tokens,
@@ -1057,6 +1059,10 @@ def _evaluate_model(
             text = ""
             trace = CognitiveTrace()
             reward = RewardBreakdown()
+            # CRITICAL: orphaned daemon thread still holds old generator reference.
+            # Create fresh generator so next prompt doesn't share METIS state
+            # with the still-running background thread (race condition).
+            generator = MetisGenerator(model, tokenizer)
         else:
             text, trace = result_container[0]
             reward = reward_computer.compute(trace)
