@@ -40,7 +40,7 @@ class MetisGenerator:
         self._device = device or str(next(model.parameters()).device)
         self._metis = Metis.attach(model, tokenizer, config=metis_config)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate(
         self,
         prompt: str,

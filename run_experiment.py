@@ -1085,8 +1085,13 @@ def _evaluate_model(
         )
 
         # ── VRAM hygiene: prevent CUDA memory fragmentation ──
-        if torch.cuda.is_available() and (i + 1) % 5 == 0:
+        # Must run EVERY prompt — 50 prompts × 200 tokens of KV cache alloc/free
+        # fragments CUDA memory progressively, causing 100x+ slowdown via swap thrashing
+        del trace, text
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if (i + 1) % 10 == 0:
+            gc.collect()
 
     # Store per-prompt rewards for statistical tests
     metrics.per_prompt_rewards = total_rewards

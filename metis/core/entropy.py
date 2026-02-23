@@ -56,7 +56,7 @@ class SemanticEntropyComputer:
         """
         self._embedding_matrix = embedding_matrix
     
-    @torch.no_grad()
+    @torch.inference_mode()
     def compute(self, logits: torch.Tensor) -> Tuple[float, float, float, float]:
         """
         Compute semantic entropy.
@@ -94,7 +94,7 @@ class SemanticEntropyComputer:
         
         return semantic_entropy, token_entropy, semantic_diversity, confidence
     
-    @torch.no_grad()
+    @torch.inference_mode()
     def _compute_semantic_diversity(self, logits: torch.Tensor) -> float:
         """
         Compute probability-weighted semantic diversity of top tokens.

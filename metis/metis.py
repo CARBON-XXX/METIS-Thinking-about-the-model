@@ -148,7 +148,7 @@ class Metis:
         """Set embedding matrix (for semantic diversity computation)"""
         self._entropy.set_embedding_matrix(embedding_matrix)
     
-    @torch.no_grad()
+    @torch.inference_mode()
     def step(self, logits: torch.Tensor) -> CognitiveSignal:
         """
         Process one step of inference logits, return full cognitive signal.
