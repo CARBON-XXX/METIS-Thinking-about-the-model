@@ -15,7 +15,7 @@ from ..core.types import EpistemicState, BoundaryAction, CognitiveSignal
 
 # ── Constants ──
 Z_UNCERTAIN_DEFAULT = 1.0       # z > 1.0 → UNCERTAIN
-Z_UNKNOWN_DEFAULT = 2.0         # z > 2.0 → UNKNOWN
+Z_UNKNOWN_DEFAULT = 1.5         # z > 1.5 → UNKNOWN (lowered from 2.0)
 Z_KNOWN_DEFAULT = -0.5          # z < -0.5 → KNOWN
 MIN_WARMUP_TOKENS = 20          # Cold-start token count
 

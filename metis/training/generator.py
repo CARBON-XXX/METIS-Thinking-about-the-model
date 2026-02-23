@@ -1,14 +1,9 @@
 """
-METIS Lightweight Generator — Token-by-token generation with cognitive tracing
+METIS Generator — Token-by-token generation with cognitive tracing.
 
-Pure transformers implementation (no vllm dependency).
-Each token's logits pass through Metis.step() to collect CognitiveTrace,
-which is then used by CognitiveRewardComputer for training rewards.
-
-This is the bridge between model inference and training pipeline:
-    Model.forward() → logits → Metis.step() → CognitiveSignal
-                    → sample token → feed_surprise() → next token
-                    → CognitiveTrace → CognitiveReward → DPO/GRPO
+Uses manual autoregressive loop with KV cache. METIS step() is called
+every `metis_stride` tokens (default 4) to reduce CPU overhead while
+still producing enough cognitive events for reward computation.
 
 Usage:
     generator = MetisGenerator(model, tokenizer)
@@ -31,13 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class MetisGenerator:
-    """
-    Lightweight METIS-instrumented text generator.
-
-    Generates text token-by-token using a HuggingFace model,
-    running Metis.step() on each token's logits to collect
-    full CognitiveTrace for reward computation.
-    """
+    """METIS-instrumented text generator with strided cognitive analysis."""
 
     def __init__(
         self,
@@ -46,18 +35,9 @@ class MetisGenerator:
         metis_config: Optional[ControllerConfig] = None,
         device: Optional[str] = None,
     ):
-        """
-        Args:
-            model: HuggingFace model (AutoModelForCausalLM)
-            tokenizer: HuggingFace tokenizer
-            metis_config: Optional METIS controller configuration
-            device: Device string (auto-detected if None)
-        """
         self._model = model
         self._tokenizer = tokenizer
         self._device = device or str(next(model.parameters()).device)
-
-        # Initialize METIS core
         self._metis = Metis.attach(model, tokenizer, config=metis_config)
 
     @torch.no_grad()
@@ -70,37 +50,26 @@ class MetisGenerator:
         top_k: int = 50,
         repetition_penalty: float = 1.1,
         do_sample: bool = True,
+        metis_stride: int = 4,
     ) -> Tuple[str, CognitiveTrace]:
         """
-        Generate text with full METIS cognitive tracing.
+        Generate text with strided METIS cognitive tracing.
 
-        Args:
-            prompt: Input prompt text
-            max_new_tokens: Maximum tokens to generate
-            temperature: Sampling temperature
-            top_p: Nucleus sampling threshold
-            top_k: Top-k sampling parameter
-            repetition_penalty: Repetition penalty factor
-            do_sample: Whether to sample (False = greedy)
-
-        Returns:
-            (generated_text, CognitiveTrace) tuple
+        METIS step() runs every `metis_stride` tokens. For 200 tokens
+        with stride=4 → 50 cognitive events, sufficient for rewards.
         """
-        # Encode prompt
         inputs = self._tokenizer(
             prompt, return_tensors="pt", add_special_tokens=True
         ).to(self._device)
         input_ids = inputs["input_ids"]
         attention_mask = inputs.get("attention_mask", torch.ones_like(input_ids))
 
-        # Start METIS session
         self._metis.start_session(prompt)
 
         generated_ids: List[int] = []
         past_key_values = None
 
         for step in range(max_new_tokens):
-            # Forward pass
             if past_key_values is None:
                 outputs = self._model(
                     input_ids=input_ids,
@@ -108,7 +77,6 @@ class MetisGenerator:
                     use_cache=True,
                 )
             else:
-                # Incremental decoding: only pass last token
                 last_token = torch.tensor(
                     [[generated_ids[-1]]], device=self._device
                 )
@@ -127,16 +95,15 @@ class MetisGenerator:
             logits = outputs.logits[:, -1, :]  # [1, vocab_size]
             past_key_values = outputs.past_key_values
 
-            # ─── METIS cognitive step ───
-            signal = self._metis.step(logits)
+            # METIS cognitive step (strided)
+            do_metis = (step % metis_stride == 0)
+            if do_metis:
+                self._metis.step(logits)
 
-            # ─── Token surprise computation ───
+            # Sampling
             log_probs = F.log_softmax(logits.float(), dim=-1)
-
-            # ─── Sampling ───
             next_logits = logits.clone().float()
 
-            # Repetition penalty
             if repetition_penalty != 1.0 and generated_ids:
                 for prev_id in set(generated_ids):
                     if next_logits[0, prev_id] > 0:
@@ -145,16 +112,11 @@ class MetisGenerator:
                         next_logits[0, prev_id] *= repetition_penalty
 
             if do_sample and temperature > 0:
-                # Temperature scaling
                 next_logits = next_logits / temperature
-
-                # Top-k filtering
                 if top_k > 0:
                     topk_vals, _ = torch.topk(next_logits, top_k, dim=-1)
                     min_topk = topk_vals[:, -1].unsqueeze(-1)
                     next_logits[next_logits < min_topk] = float("-inf")
-
-                # Top-p (nucleus) filtering
                 if top_p < 1.0:
                     sorted_logits, sorted_indices = torch.sort(
                         next_logits, descending=True, dim=-1
@@ -162,12 +124,9 @@ class MetisGenerator:
                     cumulative_probs = torch.cumsum(
                         F.softmax(sorted_logits, dim=-1), dim=-1
                     )
-                    # Remove tokens with cumulative probability above threshold
                     sorted_mask = cumulative_probs - F.softmax(sorted_logits, dim=-1) >= top_p
                     sorted_logits[sorted_mask] = float("-inf")
-                    # Scatter back
                     next_logits.scatter_(1, sorted_indices, sorted_logits)
-
                 probs = F.softmax(next_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
             else:
@@ -175,26 +134,18 @@ class MetisGenerator:
 
             token_id = next_token.item()
 
-            # ─── Feed surprise back to METIS ───
-            token_log_prob = log_probs[0, token_id].item()
-            token_surprise = -token_log_prob / math.log(2) if token_log_prob < 0 else 0.0
-            self._metis.feed_surprise(token_surprise)
+            if do_metis:
+                token_log_prob = log_probs[0, token_id].item()
+                surprise = -token_log_prob / math.log(2) if token_log_prob < 0 else 0.0
+                self._metis.feed_surprise(surprise)
 
             generated_ids.append(token_id)
-
-            # Check EOS
             if token_id == self._tokenizer.eos_token_id:
                 break
 
-        # Explicitly release GPU tensors before decode
         del past_key_values, logits, outputs
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
-        # Decode
         generated_text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-        # Get trace
         trace = self._metis.trace
         self._metis.end_session()
 
@@ -207,21 +158,7 @@ class MetisGenerator:
         temperatures: Optional[List[float]] = None,
         **kwargs,
     ) -> List[Tuple[str, CognitiveTrace]]:
-        """
-        Generate multiple responses for the same prompt.
-
-        Used for GRPO: generate N samples, rank by cognitive reward.
-
-        Args:
-            prompt: Input prompt
-            n_samples: Number of samples to generate
-            temperatures: Optional list of temperatures (one per sample).
-                         If None, spreads around kwargs['temperature'] or 0.7.
-            **kwargs: Additional args passed to generate()
-
-        Returns:
-            List of (text, CognitiveTrace) tuples
-        """
+        """Generate multiple responses for the same prompt."""
         if temperatures is None:
             base_t = kwargs.pop("temperature", 0.7)
             spread = 0.15

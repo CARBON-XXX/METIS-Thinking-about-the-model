@@ -1,4 +1,4 @@
-# METIS Engineering Challenges & Solutions
+ # METIS Engineering Challenges & Solutions
 
 > **Metacognitive Entropy-driven Thinking & Introspection System**
 > Technical Problem-Solving Documentation
