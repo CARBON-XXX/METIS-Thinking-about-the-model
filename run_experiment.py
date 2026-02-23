@@ -472,7 +472,7 @@ class ExperimentConfig:
     dpo_epochs: int = 2
     dpo_learning_rate: float = 1e-6     # Moderate: enough signal to cross KL barrier
     dpo_batch_size: int = 2              # Effective batch = 16 with accum=8
-    dpo_beta: float = 0.2               # Higher beta = stronger KL constraint vs reference
+    dpo_beta: float = 0.35              # Higher beta = stronger KL constraint vs reference
     dpo_max_length: int = 384
     gradient_checkpointing: bool = True
     dpo_gradient_accumulation: int = 8   # Effective batch = 8
@@ -601,6 +601,8 @@ def phase1_generate(
                     "total_tokens": trace.total_tokens,
                     "mean_entropy": trace.mean_entropy,
                     "mean_surprise": trace.mean_surprise,
+                    "fast_ratio": trace.fast_count / max(trace.total_tokens, 1),
+                    "deep_ratio": trace.deep_count / max(trace.total_tokens, 1),
                 },
             }
             all_data.append(entry)
@@ -693,21 +695,31 @@ def phase2_train(
 
 
 def _build_metis_pairs(scored_data: List[Dict]) -> List[Dict]:
-    """Build DPO pairs with cognitive contrastive filtering.
+    """Build DPO pairs with constrained cognitive matching.
 
-    Three-gate filtering pipeline:
-    1. Hard margin gate: reward_total diff >= 0.15
-       (filters out statistical noise floor from fluency variation)
-    2. Length comparability: neither response >50% longer
-       (prevents "shorter is better" spurious signal)
-    3. Cognitive dimension gate: best must beat worst on
-       R_efficiency OR R_phase by >= 0.05
-       (ensures the pair encodes cognitive preference, not format alignment)
-
-    High rejection rate is expected (~60-70%). Quality > quantity for DPO.
+    Anti-reward-hacking pipeline:
+    1. Classify samples by decision profile (DEEP-present vs FAST-only)
+    2. Homogeneous matching: same-type pairs use full reward_total
+    3. Cross-type matching: quality veto — cognitive quality score
+       (calibration + phase + epistemic, excluding efficiency) determines
+       Chosen/Rejected to prevent efficiency from dominating pair selection
+    4. Hard margin gate on the comparison score
     """
-    MARGIN_THRESHOLD = 0.15
-    COGNITIVE_THRESHOLD = 0.05
+    MARGIN_THRESHOLD = 0.08  # Lower: efficiency no longer inflates margins
+
+    def _cognitive_quality(s: Dict) -> float:
+        """Cognitive quality score — excludes efficiency to break label inversion."""
+        bd = s.get("reward_breakdown", {})
+        return (
+            0.35 * bd.get("calibration", 0)
+            + 0.30 * bd.get("phase_quality", 0)
+            + 0.20 * bd.get("epistemic_honesty", 0)
+            + 0.15 * bd.get("coherence", 0)
+        )
+
+    def _has_deep(s: Dict) -> bool:
+        """Check if sample has DEEP decisions."""
+        return s.get("trace_stats", {}).get("deep_ratio", 0) > 0.05
 
     by_prompt: Dict[str, List[Dict]] = {}
     for entry in scored_data:
@@ -719,52 +731,89 @@ def _build_metis_pairs(scored_data: List[Dict]) -> List[Dict]:
     pairs = []
     n_total = len(by_prompt)
     n_margin_fail = 0
-    n_cognitive_fail = 0
+    n_homo_pairs = 0
+    n_veto_pairs = 0
 
     for prompt, samples in by_prompt.items():
-        samples.sort(key=lambda x: x["reward_total"], reverse=True)
+        if len(samples) < 2:
+            continue
 
-        # Find valid worst with comparable length
-        best = samples[0]
-        worst = None
-        for candidate in reversed(samples):
-            if candidate is best:
-                continue
-            len_best = len(best["response"])
-            len_cand = len(candidate["response"])
-            ratio = max(len_best, len_cand) / max(min(len_best, len_cand), 1)
-            if ratio <= 1.5:
-                worst = candidate
-                break
-        if worst is None:
-            worst = samples[-1]
+        # Split by decision profile
+        deep_samples = [s for s in samples if _has_deep(s)]
+        fast_samples = [s for s in samples if not _has_deep(s)]
 
-        # Gate 1: Hard margin on total reward
-        margin = best["reward_total"] - worst["reward_total"]
-        if margin < MARGIN_THRESHOLD:
+        chosen = None
+        rejected = None
+        pair_type = ""
+
+        # Strategy A: Cross-type quality veto
+        # If we have both DEEP and FAST samples, compare by cognitive quality
+        if deep_samples and fast_samples:
+            best_deep = max(deep_samples, key=_cognitive_quality)
+            best_fast = max(fast_samples, key=_cognitive_quality)
+            worst_fast = min(fast_samples, key=_cognitive_quality)
+            worst_deep = min(deep_samples, key=_cognitive_quality)
+
+            cq_deep = _cognitive_quality(best_deep)
+            cq_fast_worst = _cognitive_quality(worst_fast)
+
+            # Quality veto: if DEEP has better cognitive quality than worst FAST,
+            # DEEP is Chosen — this teaches the model that thinking pays off
+            if cq_deep - cq_fast_worst >= MARGIN_THRESHOLD:
+                chosen, rejected = best_deep, worst_fast
+                pair_type = "veto_deep_wins"
+            else:
+                # Fallback: best FAST vs worst DEEP (FAST legitimately better)
+                cq_fast = _cognitive_quality(best_fast)
+                cq_deep_worst = _cognitive_quality(worst_deep)
+                if cq_fast - cq_deep_worst >= MARGIN_THRESHOLD:
+                    chosen, rejected = best_fast, worst_deep
+                    pair_type = "veto_fast_wins"
+
+        # Strategy B: Homogeneous matching (same-type, full reward_total)
+        if chosen is None:
+            # Use full reward_total within same type
+            all_sorted = sorted(samples, key=lambda x: x["reward_total"], reverse=True)
+            best = all_sorted[0]
+            # Find worst with comparable length
+            worst = None
+            for candidate in reversed(all_sorted):
+                if candidate is best:
+                    continue
+                len_best = len(best["response"])
+                len_cand = len(candidate["response"])
+                ratio = max(len_best, len_cand) / max(min(len_best, len_cand), 1)
+                if ratio <= 1.5:
+                    worst = candidate
+                    break
+            if worst is None:
+                worst = all_sorted[-1]
+
+            margin = best["reward_total"] - worst["reward_total"]
+            if margin >= MARGIN_THRESHOLD:
+                chosen, rejected = best, worst
+                pair_type = "homo"
+
+        if chosen is None:
             n_margin_fail += 1
             continue
 
-        # Gate 2: Cognitive dimension contrastive check
-        best_bd = best.get("reward_breakdown", {})
-        worst_bd = worst.get("reward_breakdown", {})
-        eff_diff = best_bd.get("efficiency", 0) - worst_bd.get("efficiency", 0)
-        phase_diff = best_bd.get("phase_quality", 0) - worst_bd.get("phase_quality", 0)
-
-        if eff_diff < COGNITIVE_THRESHOLD and phase_diff < COGNITIVE_THRESHOLD:
-            n_cognitive_fail += 1
-            continue
+        if pair_type == "homo":
+            n_homo_pairs += 1
+        else:
+            n_veto_pairs += 1
 
         pairs.append({
-            "prompt": best["chat_prompt"],
-            "chosen": best["response"],
-            "rejected": worst["response"],
+            "prompt": chosen["chat_prompt"],
+            "chosen": chosen["response"],
+            "rejected": rejected["response"],
         })
 
     n_pass = len(pairs)
     logger.info(
         f"[Pair Filter] {n_total} prompts → {n_pass} pairs "
-        f"(margin_fail={n_margin_fail}, cognitive_fail={n_cognitive_fail}, "
+        f"(homo={n_homo_pairs}, veto={n_veto_pairs}, "
+        f"margin_fail={n_margin_fail}, "
         f"rejection_rate={1 - n_pass / max(n_total, 1):.0%})"
     )
     return pairs

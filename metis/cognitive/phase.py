@@ -85,11 +85,14 @@ class CognitivePhaseDetector:
         # ── Phase classification (priority order) ──
         prev_phase = self._phase
 
-        if w_z > 0.5 and w_diversity < 0.60 and w_momentum >= 0.0:
-            # Elevated entropy + low diversity + non-decreasing entropy = stuck
+        if w_z > 0.2 and w_diversity < 0.75:
+            # Moderate-to-high entropy + limited diversity = cognitively stuck
+            # (Relaxed from w_z>0.5/div<0.60/mom>=0: those triple conditions
+            #  were never satisfied because z oscillates and 1.5B models have
+            #  naturally high diversity at high entropy)
             new_phase = CognitivePhase.CONFUSION
-        elif w_z > 0.5 and w_diversity >= 0.60:
-            # High entropy + high diversity = searching for answer
+        elif w_z > 0.3 and w_diversity >= 0.75:
+            # High entropy + genuinely high diversity = exploring solution space
             new_phase = CognitivePhase.EXPLORATION
         elif w_deep_ratio > 0.3 or (w_z > 0.3 and w_z <= 0.8):
             # Moderate uncertainty with DEEP decisions = active reasoning

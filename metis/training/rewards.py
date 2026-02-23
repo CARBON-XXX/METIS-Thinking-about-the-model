@@ -46,10 +46,10 @@ class RewardConfig:
     """Weights and hyperparameters for cognitive reward computation."""
     # Component weights (must sum to 1.0)
     w_coherence: float = 0.20
-    w_calibration: float = 0.30
-    w_phase: float = 0.20
+    w_calibration: float = 0.34
+    w_phase: float = 0.23
     w_epistemic: float = 0.15
-    w_efficiency: float = 0.15
+    w_efficiency: float = 0.08
 
     # Coherence v2: windowed CV + entropy floor
     coherence_cv_scale: float = 0.5       # Reduced: 2.0 was over-penalizing DPO models
@@ -497,45 +497,48 @@ class CognitiveRewardComputer:
         if n == 0:
             return 0.0
 
-        fast_count = sum(1 for e in events if e.decision == Decision.FAST)
         deep_count = sum(1 for e in events if e.decision == Decision.DEEP)
-        fast_ratio = fast_count / n
-        deep_ratio = deep_count / n
 
-        # Count DEEP tokens followed by resolution (entropy drops after DEEP)
+        # ── Decision appropriateness: does the decision match uncertainty? ──
+        # FAST  + z ≤ 0.0  → appropriate (confident → fast output)
+        # DEEP  + z > 0.3  → appropriate (uncertain → deliberate thinking)
+        # NORMAL            → always appropriate (default processing)
+        # FAST  + z > 0.5  → inappropriate (hasty under uncertainty)
+        # DEEP  + z ≤ -0.2 → inappropriate (overthinking when confident)
+        appropriate = 0
+        for e in events:
+            if e.decision == Decision.FAST:
+                if e.z_score <= 0.0:
+                    appropriate += 1        # confident + fast = ideal
+                elif e.z_score <= 0.5:
+                    appropriate += 0.5      # borderline, partial credit
+                # z > 0.5 + FAST → 0 credit (hasty)
+            elif e.decision == Decision.DEEP:
+                if e.z_score > 0.3:
+                    appropriate += 1        # uncertain + thinking = ideal
+                elif e.z_score > -0.2:
+                    appropriate += 0.5      # borderline, partial credit
+                # z ≤ -0.2 + DEEP → 0 credit (overthinking)
+            else:
+                appropriate += 0.7          # NORMAL is acceptable default
+
+        appropriateness = appropriate / n   # [0, 1]
+
+        # ── DEEP resolution bonus: reward productive System 2 ──
         resolved_deep = 0
         for i in range(len(events) - 1):
             if events[i].decision == Decision.DEEP:
-                # Check if next 3 tokens show entropy decrease
                 lookahead = events[i + 1 : min(i + 4, len(events))]
                 if lookahead and any(
                     e.token_entropy < events[i].token_entropy * 0.7
                     for e in lookahead
                 ):
                     resolved_deep += 1
+        resolution_rate = resolved_deep / max(deep_count, 1)
+        resolution_bonus = resolution_rate * 0.3
 
-        deep_resolution_rate = resolved_deep / max(deep_count, 1)
-
-        # Reward = FAST efficiency + DEEP resolution rate - overthinking penalty
-        target = self._config.efficiency_target_fast
-        # FAST bonus gated by calibration: only reward FAST when model
-        # is well-calibrated (prevents gaming by collapsing to low entropy)
-        baseline = self._config.calibration_surprise_baseline
-        miscal_sum = 0.0
-        for e in events:
-            excess = e.token_surprise - baseline
-            if excess > 0:
-                miscal_sum += e.confidence * excess
-        mean_miscal = miscal_sum / max(n, 1)
-        is_well_calibrated = mean_miscal < 0.2
-
-        fast_bonus = min(1.0, fast_ratio / max(target, 0.01)) if is_well_calibrated else 0.0
-        deep_penalty = max(0, deep_ratio - 0.3)  # Penalize >30% DEEP
-        resolution_bonus = deep_resolution_rate * 0.5  # Bonus for useful DEEP
-
-        # Length factor: prevent "short talk" gaming
-        # If fewer than 40 events, scale down positive rewards proportionally
-        # This blocks the exploit where 10 FAST tokens → high efficiency score
+        # ── Length factor: prevent short-sequence gaming ──
         length_factor = min(1.0, n / 40.0)
-        reward = (0.5 * fast_bonus + resolution_bonus) * length_factor - deep_penalty
+
+        reward = (appropriateness + resolution_bonus) * length_factor
         return max(-1.0, min(1.0, reward))
