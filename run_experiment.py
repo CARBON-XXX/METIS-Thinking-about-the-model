@@ -965,9 +965,21 @@ def phase3_evaluate(
         metis_metrics = _evaluate_model(
             config, metis_model, tokenizer, eval_prompts, reward_computer, "METIS-DPO"
         )
-        del metis_model
+        # CRITICAL: PeftModel.from_pretrained injects LoRA layers INTO base_model's
+        # Linear modules. Simply deleting the PeftModel reference does NOT remove
+        # the injected layers. We must destroy and reload from scratch to prevent
+        # adapter stacking when loading Random DPO next.
+        del metis_model, base_model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        gc.collect()
+        logger.info("Reloading clean base model after METIS DPO eval...")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            config.model_name,
+            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto" if config.device == "auto" else None,
+        )
+        base_model.eval()
     else:
         logger.warning("No METIS DPO checkpoint found — using base metrics as fallback")
         metis_metrics = base_metrics
@@ -1000,8 +1012,12 @@ def _evaluate_model(
     name: str,
 ) -> EvalMetrics:
     """Evaluate a single model on prompts."""
+    import threading
     from metis.training.generator import MetisGenerator
-    from metis.core.types import Decision
+    from metis.core.types import Decision, CognitiveTrace
+    from metis.training.rewards import RewardBreakdown
+
+    WALL_CLOCK_TIMEOUT = 120  # seconds — hard circuit breaker per prompt
 
     generator = MetisGenerator(model, tokenizer)
     metrics = EvalMetrics(name=name, n_responses=len(prompts))
@@ -1011,16 +1027,40 @@ def _evaluate_model(
 
     for i, prompt in enumerate(prompts):
         chat_prompt = _format_chat(tokenizer, prompt)
-        # Use generate_batch(n_samples=1) for code path consistency with Phase 1
-        samples = generator.generate_batch(
-            chat_prompt,
-            n_samples=1,
-            temperatures=[config.eval_temperature],
-            max_new_tokens=config.eval_max_tokens,
-        )
-        text, trace = samples[0]
 
-        reward = reward_computer.compute(trace)
+        # ── Wall-clock circuit breaker ──
+        # Prevents single-prompt pathological loops from blocking the entire eval
+        result_container: list = []
+
+        def _generate_with_timeout():
+            try:
+                samples = generator.generate_batch(
+                    chat_prompt,
+                    n_samples=1,
+                    temperatures=[config.eval_temperature],
+                    max_new_tokens=config.eval_max_tokens,
+                )
+                result_container.append(samples[0])
+            except Exception as e:
+                logger.warning(f"  [{name}] {i+1}/{len(prompts)}: generation error: {e}")
+
+        gen_thread = threading.Thread(target=_generate_with_timeout, daemon=True)
+        gen_thread.start()
+        gen_thread.join(timeout=WALL_CLOCK_TIMEOUT)
+
+        if gen_thread.is_alive() or not result_container:
+            # Timeout or error — produce fallback metrics
+            logger.warning(
+                f"  [{name}] {i+1}/{len(prompts)}: TIMEOUT ({WALL_CLOCK_TIMEOUT}s) "
+                f"— falling back to zero reward"
+            )
+            text = ""
+            trace = CognitiveTrace()
+            reward = RewardBreakdown()
+        else:
+            text, trace = result_container[0]
+            reward = reward_computer.compute(trace)
+
         total_rewards.append(reward.total)
         all_breakdowns.append(reward)
 
@@ -1044,8 +1084,9 @@ def _evaluate_model(
             f"resp={text[:50]}..."
         )
 
-    # Store per-prompt rewards for statistical tests
-    metrics.per_prompt_rewards = total_rewards
+        # ── VRAM hygiene: prevent CUDA memory fragmentation ──
+        if torch.cuda.is_available() and (i + 1) % 5 == 0:
+            torch.cuda.empty_cache()
 
     # Store per-prompt rewards for statistical tests
     metrics.per_prompt_rewards = total_rewards
