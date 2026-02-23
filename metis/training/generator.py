@@ -12,6 +12,7 @@ Usage:
 """
 from __future__ import annotations
 
+import gc
 import math
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -98,7 +99,7 @@ class MetisGenerator:
             # METIS cognitive step (strided)
             do_metis = (step % metis_stride == 0)
             if do_metis:
-                self._metis.step(logits)
+                self._metis.step(logits.clone())
 
             # Sampling
             log_probs = F.log_softmax(logits.float(), dim=-1)
@@ -178,5 +179,10 @@ class MetisGenerator:
             logger.info(f"[Generator] Sample {i+1}/{n_samples} (temp={temp:.2f})")
             text, trace = self.generate(prompt, temperature=temp, **kwargs)
             results.append((text, trace))
+
+            # Sever cross-sample VRAM fragmentation accumulation
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         return results
