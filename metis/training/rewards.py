@@ -375,7 +375,7 @@ class CognitiveRewardComputer:
         else:
             arc_score = 0.0  # Too short to detect arc
 
-        # ── Sub-signal 3: Confusion + oscillation penalty ──
+        # ── Sub-signal 3: Confusion penalty with Cognitive Recovery Bonus ──
         confusion_count = sum(1 for e in events if getattr(e.cognitive_phase, "value", e.cognitive_phase) == "confusion")
         confusion_ratio = confusion_count / n
 
@@ -385,12 +385,38 @@ class CognitiveRewardComputer:
                 transitions += 1
         oscillation_rate = transitions / max(n - 1, 1)
 
+        # Detect cognitive recovery: confusion with DEEP → entropy drop → reasoning/recall
+        recovered = False
+        if confusion_count > 0:
+            # Check if any confusion segment contains DEEP and is followed by resolution
+            in_confusion = False
+            had_deep_in_confusion = False
+            for i, e in enumerate(events):
+                phase_val = getattr(e.cognitive_phase, "value", e.cognitive_phase)
+                if phase_val == "confusion":
+                    in_confusion = True
+                    if e.decision == Decision.DEEP:
+                        had_deep_in_confusion = True
+                elif in_confusion:
+                    # Exited confusion — check if it resolved
+                    if had_deep_in_confusion and phase_val in ("reasoning", "recall", "fluent"):
+                        recovered = True
+                        break
+                    in_confusion = False
+                    had_deep_in_confusion = False
+
         penalty = 0.0
-        penalty += cfg.phase_confusion_penalty * confusion_ratio
+        recovery_bonus = 0.0
+        if recovered:
+            # Successful cognitive recovery: confusion is investment, not failure
+            recovery_bonus = min(0.3, confusion_ratio * 2.0)
+        else:
+            # Unresolved confusion: penalize (but less harshly than before)
+            penalty += cfg.phase_confusion_penalty * confusion_ratio * 0.5
         penalty += cfg.phase_oscillation_penalty * max(0, oscillation_rate - 0.4)
 
         # ── Combine ──
-        reward = diversity_score + arc_score - penalty
+        reward = diversity_score + arc_score + recovery_bonus - penalty
         return max(-1.0, min(1.0, reward))
 
     # ═══════════════════════════════════════════════════════
@@ -455,11 +481,13 @@ class CognitiveRewardComputer:
             if is_uncertain and is_confident_output:
                 weight = cfg.epistemic_unknown_penalty if e.epistemic_state == EpistemicState.UNKNOWN else 1.0
                 dishonest_penalty += weight
+            elif is_uncertain and e.decision == Decision.DEEP:
+                honest_count += 1.5  # Highest honesty: actively reasoning under uncertainty
             elif is_uncertain and e.boundary_action in (
                 BoundaryAction.HEDGE,
                 BoundaryAction.REFUSE,
             ):
-                honest_count += 1
+                honest_count += 1.0  # Sub-optimal: admitting ignorance without attempting resolution
             elif not is_uncertain and is_confident_output:
                 honest_count += 1
 
@@ -519,8 +547,13 @@ class CognitiveRewardComputer:
                 elif e.z_score > -0.2:
                     appropriate += 0.5      # borderline, partial credit
                 # z ≤ -0.2 + DEEP → 0 credit (overthinking)
-            else:
-                appropriate += 0.7          # NORMAL is acceptable default
+            else:  # Decision.NORMAL
+                if e.z_score > 0.4:
+                    appropriate += 0.0      # cognitive laziness: should be DEEP
+                elif e.z_score > 0.0:
+                    appropriate += 0.35     # borderline: mild penalty
+                else:
+                    appropriate += 0.7      # low-entropy default: acceptable
 
         appropriateness = appropriate / n   # [0, 1]
 
