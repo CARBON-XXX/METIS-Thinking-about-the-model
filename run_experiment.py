@@ -937,17 +937,26 @@ def phase3_evaluate(
     # ─── Reload clean base model ───
     # Phase 2 LoRA train/unload corrupts base_model weights.
     # Reload from checkpoint to ensure fair base model evaluation.
+    # CRITICAL: do NOT use device_map="auto" — after Phase 2 training,
+    # VRAM has fragmented cache residue. Accelerate sees "low free VRAM"
+    # and offloads layers to CPU RAM, causing PCIe bus bottleneck that
+    # degrades from 15s→42s+ per prompt during autoregressive generation.
     from transformers import AutoModelForCausalLM
     logger.info("Reloading clean base model for evaluation...")
-    del base_model
+    try:
+        del base_model
+    except NameError:
+        pass
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    gc.collect()
+        torch.cuda.ipc_collect()
+    device = config.device if config.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     base_model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        device_map="auto" if config.device == "auto" else None,
-    )
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        trust_remote_code=True,
+    ).to(device)
     base_model.eval()
 
     # ─── Evaluate Base Model ───
@@ -973,12 +982,14 @@ def phase3_evaluate(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.ipc_collect()
         logger.info("Reloading clean base model after METIS DPO eval...")
         base_model = AutoModelForCausalLM.from_pretrained(
             config.model_name,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if config.device == "auto" else None,
-        )
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            trust_remote_code=True,
+        ).to(device)
         base_model.eval()
     else:
         logger.warning("No METIS DPO checkpoint found — using base metrics as fallback")
