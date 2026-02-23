@@ -46,8 +46,6 @@ class CognitivePhaseDetector:
     def __init__(self):
         self._buf: deque = deque(maxlen=self.WINDOW)
         # Running session statistics for self-calibration
-        self._entropy_sum = 0.0
-        self._entropy_sq_sum = 0.0
         self._conf_sum = 0.0
         self._n = 0
         self._phase = CognitivePhase.RECALL
@@ -61,8 +59,6 @@ class CognitivePhaseDetector:
         """
         self._buf.append(signal)
         self._n += 1
-        self._entropy_sum += signal.semantic_entropy
-        self._entropy_sq_sum += signal.semantic_entropy ** 2
         self._conf_sum += signal.confidence
 
         if len(self._buf) < self.WINDOW:
@@ -78,32 +74,30 @@ class CognitivePhaseDetector:
         w_fast_ratio = sum(1 for s in buf if s.decision == Decision.FAST) / w
         w_momentum = sum(s.entropy_momentum for s in buf) / w
 
-        # ── Session-level calibration ──
-        sess_mean_h = self._entropy_sum / self._n
-        sess_var_h = max(self._entropy_sq_sum / self._n - sess_mean_h ** 2, 0.001)
-        sess_std_h = sess_var_h ** 0.5
-        sess_mean_c = self._conf_sum / self._n
+        # Use EMA-smoothed z_score from controller (immune to short-sequence
+        # mean collapse that plagued the old sess_mean_h approach)
+        w_z = sum(s.z_score for s in buf) / w
 
-        # Relative positions (z-scores relative to session)
-        h_rel = (w_entropy - sess_mean_h) / max(sess_std_h, 0.01)
+        # ── Session-level calibration (confidence only) ──
+        sess_mean_c = self._conf_sum / self._n
         c_rel = w_conf - sess_mean_c  # Confidence relative to session mean
 
         # ── Phase classification (priority order) ──
         prev_phase = self._phase
 
-        if h_rel > 0.5 and w_diversity < 0.60 and w_momentum >= 0.0:
+        if w_z > 0.5 and w_diversity < 0.60 and w_momentum >= 0.0:
             # Elevated entropy + low diversity + non-decreasing entropy = stuck
             new_phase = CognitivePhase.CONFUSION
-        elif h_rel > 0.5 and w_diversity >= 0.60:
+        elif w_z > 0.5 and w_diversity >= 0.60:
             # High entropy + high diversity = searching for answer
             new_phase = CognitivePhase.EXPLORATION
-        elif w_deep_ratio > 0.3 or (h_rel > 0.3 and h_rel <= 0.8):
+        elif w_deep_ratio > 0.3 or (w_z > 0.3 and w_z <= 0.8):
             # Moderate uncertainty with DEEP decisions = active reasoning
             new_phase = CognitivePhase.REASONING
-        elif h_rel < -0.5 and w_conf > 0.85 and w_fast_ratio > 0.7:
+        elif w_z < -0.5 and w_conf > 0.85 and w_fast_ratio > 0.7:
             # Very low entropy + very high confidence + mostly FAST = autopilot
             new_phase = CognitivePhase.FLUENT
-        elif c_rel >= 0 and h_rel <= 0.3:
+        elif c_rel >= 0 and w_z <= 0.3:
             # Above-average confidence + below-average entropy = recall
             new_phase = CognitivePhase.RECALL
         else:
@@ -128,8 +122,6 @@ class CognitivePhaseDetector:
 
     def reset(self) -> None:
         self._buf.clear()
-        self._entropy_sum = 0.0
-        self._entropy_sq_sum = 0.0
         self._conf_sum = 0.0
         self._n = 0
         self._phase = CognitivePhase.RECALL

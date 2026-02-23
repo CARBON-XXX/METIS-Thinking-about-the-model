@@ -108,7 +108,7 @@ class AdaptiveController:
 
         # ── Thresholds (cold start) ──
         self._fast_threshold = 1.5      # Below this -> FAST
-        self._deep_threshold = 5.25     # Above this -> DEEP
+        self._deep_threshold = 2.0      # Above this -> DEEP (was 5.25 — unreachable)
         self._confidence_threshold = 0.5
 
         # ── Circuit Breaker ──
@@ -226,6 +226,10 @@ class AdaptiveController:
                     if confidence is None or confidence >= 0.5:
                         self._record_decision(Decision.FAST)
                         return Decision.FAST
+                # Allow DEEP in cold start — System 2 must not be suppressed
+                elif entropy >= self._deep_threshold:
+                    self._record_decision(Decision.DEEP)
+                    return Decision.DEEP
                 return Decision.NORMAL
 
             # ── FAST Decision (System 1) ──
