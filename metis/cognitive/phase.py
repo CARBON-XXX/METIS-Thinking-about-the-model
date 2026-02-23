@@ -91,10 +91,10 @@ class CognitivePhaseDetector:
         # ── Phase classification (priority order) ──
         prev_phase = self._phase
 
-        if h_rel > 0.5 and w_diversity < 0.25 and w_momentum > 0.02:
-            # Elevated entropy + low diversity + rising momentum = stuck
+        if h_rel > 0.5 and w_diversity < 0.40 and w_momentum >= 0.0:
+            # Elevated entropy + low diversity + non-decreasing entropy = stuck
             new_phase = CognitivePhase.CONFUSION
-        elif h_rel > 0.5 and w_diversity > 0.25:
+        elif h_rel > 0.5 and w_diversity >= 0.40:
             # High entropy + high diversity = searching for answer
             new_phase = CognitivePhase.EXPLORATION
         elif w_deep_ratio > 0.3 or (h_rel > 0.3 and h_rel <= 0.8):

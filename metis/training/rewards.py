@@ -368,7 +368,7 @@ class CognitiveRewardComputer:
             arc_score = 0.0  # Too short to detect arc
 
         # ── Sub-signal 3: Confusion + oscillation penalty ──
-        confusion_count = sum(1 for e in events if e.cognitive_phase == "confusion")
+        confusion_count = sum(1 for e in events if getattr(e.cognitive_phase, "value", e.cognitive_phase) == "confusion")
         confusion_ratio = confusion_count / n
 
         transitions = 0

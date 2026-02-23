@@ -577,6 +577,15 @@ def phase1_generate(
         )
 
         for j, (text, trace) in enumerate(samples):
+            # Non-zero assertion gate: mean_entropy==0 means METIS cognitive
+            # layer was bypassed — abort before dead data enters DPO pipeline
+            if trace.total_tokens > 5 and trace.mean_entropy == 0.0:
+                raise RuntimeError(
+                    f"FATAL: trace.mean_entropy == 0.0 for prompt {i+1} sample {j}. "
+                    f"METIS cognitive hook is bypassed — logits not reaching step(). "
+                    f"Check generator.py introspect() call chain."
+                )
+
             reward = reward_computer.compute(trace)
             entry = {
                 "prompt": prompt,
@@ -595,7 +604,8 @@ def phase1_generate(
             logger.info(
                 f"  sample {j}: reward={reward.total:+.4f} "
                 f"tokens={trace.total_tokens} "
-                f"resp={text[:60]}..."
+                f"H={trace.mean_entropy:.3f} S={trace.mean_surprise:.3f} "
+                f"resp={text[:50]}..."
             )
 
         # Force VRAM garbage collection after each prompt
@@ -661,12 +671,20 @@ def phase2_train(
     random_path = os.path.join(config.output_dir, "random_dpo")
 
     # ─── Train Group A: METIS ───
-    logger.info("Training Group A (METIS DPO)...")
-    _train_dpo(config, model, tokenizer, metis_pairs, metis_path)
+    if len(metis_pairs) < 1:
+        logger.warning("No METIS pairs survived filtering — skipping METIS DPO training")
+        os.makedirs(metis_path, exist_ok=True)
+    else:
+        logger.info("Training Group A (METIS DPO)...")
+        _train_dpo(config, model, tokenizer, metis_pairs, metis_path)
 
     # ─── Train Group B: Random ───
-    logger.info("Training Group B (Random DPO)...")
-    _train_dpo(config, model, tokenizer, random_pairs, random_path)
+    if len(random_pairs) < 1:
+        logger.warning("No Random pairs — skipping Random DPO training")
+        os.makedirs(random_path, exist_ok=True)
+    else:
+        logger.info("Training Group B (Random DPO)...")
+        _train_dpo(config, model, tokenizer, random_pairs, random_path)
 
     return metis_path, random_path
 
@@ -864,6 +882,22 @@ def phase3_evaluate(
     eval_prompts = EVAL_PROMPTS[:config.n_eval_prompts]
     reward_computer = CognitiveRewardComputer()
 
+    # ─── Reload clean base model ───
+    # Phase 2 LoRA train/unload corrupts base_model weights.
+    # Reload from checkpoint to ensure fair base model evaluation.
+    from transformers import AutoModelForCausalLM
+    logger.info("Reloading clean base model for evaluation...")
+    del base_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    base_model = AutoModelForCausalLM.from_pretrained(
+        config.model_name,
+        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto" if config.device == "auto" else None,
+    )
+    base_model.eval()
+
     # ─── Evaluate Base Model ───
     logger.info("Evaluating: Base Model (no training)")
     base_metrics = _evaluate_model(
@@ -871,26 +905,36 @@ def phase3_evaluate(
     )
 
     # ─── Evaluate METIS DPO ───
-    logger.info("Evaluating: METIS DPO")
-    metis_model = PeftModel.from_pretrained(base_model, metis_path)
-    metis_model.eval()
-    metis_metrics = _evaluate_model(
-        config, metis_model, tokenizer, eval_prompts, reward_computer, "METIS-DPO"
-    )
-    del metis_model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    _has_metis_ckpt = os.path.exists(os.path.join(metis_path, "adapter_config.json"))
+    if _has_metis_ckpt:
+        logger.info("Evaluating: METIS DPO")
+        metis_model = PeftModel.from_pretrained(base_model, metis_path)
+        metis_model.eval()
+        metis_metrics = _evaluate_model(
+            config, metis_model, tokenizer, eval_prompts, reward_computer, "METIS-DPO"
+        )
+        del metis_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    else:
+        logger.warning("No METIS DPO checkpoint found — using base metrics as fallback")
+        metis_metrics = base_metrics
 
     # ─── Evaluate Random DPO ───
-    logger.info("Evaluating: Random DPO")
-    random_model = PeftModel.from_pretrained(base_model, random_path)
-    random_model.eval()
-    random_metrics = _evaluate_model(
-        config, random_model, tokenizer, eval_prompts, reward_computer, "Random-DPO"
-    )
-    del random_model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    _has_random_ckpt = os.path.exists(os.path.join(random_path, "adapter_config.json"))
+    if _has_random_ckpt:
+        logger.info("Evaluating: Random DPO")
+        random_model = PeftModel.from_pretrained(base_model, random_path)
+        random_model.eval()
+        random_metrics = _evaluate_model(
+            config, random_model, tokenizer, eval_prompts, reward_computer, "Random-DPO"
+        )
+        del random_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    else:
+        logger.warning("No Random DPO checkpoint found — using base metrics as fallback")
+        random_metrics = base_metrics
 
     return base_metrics, metis_metrics, random_metrics
 
@@ -915,11 +959,14 @@ def _evaluate_model(
 
     for i, prompt in enumerate(prompts):
         chat_prompt = _format_chat(tokenizer, prompt)
-        text, trace = generator.generate(
+        # Use generate_batch(n_samples=1) for code path consistency with Phase 1
+        samples = generator.generate_batch(
             chat_prompt,
+            n_samples=1,
+            temperatures=[config.eval_temperature],
             max_new_tokens=config.eval_max_tokens,
-            temperature=config.eval_temperature,
         )
+        text, trace = samples[0]
 
         reward = reward_computer.compute(trace)
         total_rewards.append(reward.total)
@@ -932,7 +979,7 @@ def _evaluate_model(
         metrics.mean_surprise += sum(e.token_surprise for e in events) / n
         metrics.mean_confidence += sum(e.confidence for e in events) / n
         metrics.confusion_ratio += sum(
-            1 for e in events if e.cognitive_phase == "confusion"
+            1 for e in events if getattr(e.cognitive_phase, "value", e.cognitive_phase) == "confusion"
         ) / n
         metrics.fast_ratio += sum(
             1 for e in events if e.decision == Decision.FAST

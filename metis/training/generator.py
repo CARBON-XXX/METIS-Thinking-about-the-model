@@ -146,6 +146,12 @@ class MetisGenerator:
         del past_key_values, logits, outputs
 
         generated_text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        # CRITICAL: introspect() triggers _aggregate_trace() which populates
+        # mean_entropy, mean_surprise, mean_confidence, etc. on the trace.
+        # Without this, all aggregate stats remain at default 0.0.
+        self._metis.introspect()
+
         trace = self._metis.trace
         self._metis.end_session()
 
