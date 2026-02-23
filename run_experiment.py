@@ -506,6 +506,9 @@ class EvalMetrics:
     # Per-prompt reward list (for statistical tests)
     per_prompt_rewards: List[float] = field(default_factory=list)
 
+    # Per-prompt reward list (for statistical tests)
+    per_prompt_rewards: List[float] = field(default_factory=list)
+
     # Raw signal metrics
     mean_entropy: float = 0.0
     mean_surprise: float = 0.0
@@ -995,6 +998,9 @@ def _evaluate_model(
     # Store per-prompt rewards for statistical tests
     metrics.per_prompt_rewards = total_rewards
 
+    # Store per-prompt rewards for statistical tests
+    metrics.per_prompt_rewards = total_rewards
+
     # Average all metrics
     n_prompts = len(prompts)
     metrics.reward_total = sum(total_rewards) / n_prompts
@@ -1087,6 +1093,60 @@ def phase4_report(
     print(f"    METIS DPO vs Base:    {delta(metis.reward_total, base.reward_total)}")
     print(f"    Random DPO vs Base:   {delta(random_ctrl.reward_total, base.reward_total)}")
     print(f"    METIS DPO vs Random:  {delta(metis.reward_total, random_ctrl.reward_total)}")
+
+    # ─── Statistical Analysis ───
+    print(f"\n{C.BOLD}  Statistical Analysis:{C.RESET}")
+
+    metis_rewards = metis.per_prompt_rewards
+    random_rewards = random_ctrl.per_prompt_rewards
+    base_rewards = base.per_prompt_rewards
+
+    if len(metis_rewards) >= 5 and len(random_rewards) >= 5:
+        # Paired bootstrap CI for METIS vs Random
+        n_boot = 10000
+        rng = random.Random(42)
+        n_eval = min(len(metis_rewards), len(random_rewards))
+        diffs = [metis_rewards[i] - random_rewards[i] for i in range(n_eval)]
+        boot_means = []
+        for _ in range(n_boot):
+            sample = [diffs[rng.randint(0, n_eval - 1)] for _ in range(n_eval)]
+            boot_means.append(sum(sample) / n_eval)
+        boot_means.sort()
+        ci_lo = boot_means[int(0.025 * n_boot)]
+        ci_hi = boot_means[int(0.975 * n_boot)]
+        mean_diff = sum(diffs) / n_eval
+
+        # Cohen's d (paired)
+        if n_eval > 1:
+            diff_var = sum((d - mean_diff) ** 2 for d in diffs) / (n_eval - 1)
+            diff_std = math.sqrt(diff_var) if diff_var > 0 else 1e-6
+            cohens_d = mean_diff / diff_std
+        else:
+            cohens_d = 0.0
+
+        ci_color = C.GREEN if ci_lo > 0 else (C.RED if ci_hi < 0 else C.YELLOW)
+        print(f"    METIS vs Random (paired, n={n_eval}):")
+        print(f"      Mean Δ:       {ci_color}{mean_diff:+.4f}{C.RESET}")
+        print(f"      95% Boot CI:  {ci_color}[{ci_lo:+.4f}, {ci_hi:+.4f}]{C.RESET}")
+        print(f"      Cohen's d:    {cohens_d:+.3f}", end="")
+        if abs(cohens_d) >= 0.8:
+            print(f" {C.GREEN}(large){C.RESET}")
+        elif abs(cohens_d) >= 0.5:
+            print(f" {C.YELLOW}(medium){C.RESET}")
+        elif abs(cohens_d) >= 0.2:
+            print(f" {C.YELLOW}(small){C.RESET}")
+        else:
+            print(f" {C.DIM}(negligible){C.RESET}")
+
+        sig = ci_lo > 0 or ci_hi < 0
+        if sig and mean_diff > 0:
+            print(f"\n    {C.GREEN}{C.BOLD}✓ METIS improvement is statistically significant (CI excludes 0){C.RESET}")
+        elif not sig:
+            print(f"\n    {C.YELLOW}⚠ Result not statistically significant (CI includes 0, need more data){C.RESET}")
+        else:
+            print(f"\n    {C.RED}✗ METIS underperforms Random (CI excludes 0){C.RESET}")
+    else:
+        print(f"    {C.DIM}Too few samples for statistical tests (n<5){C.RESET}")
 
     # ─── Statistical Analysis ───
     print(f"\n{C.BOLD}  Statistical Analysis:{C.RESET}")
