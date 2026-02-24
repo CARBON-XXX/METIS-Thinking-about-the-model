@@ -16,11 +16,11 @@
 <p align="center">
   <a href="#-the-paradigm-shift">Why It Matters</a> &nbsp;·&nbsp;
   <a href="#-the-core-problem-ai-has-no-idea-what-it-doesnt-know">The Problem</a> &nbsp;·&nbsp;
+  <a href="#-what-does-metis-thinking-mean">Metacognition</a> &nbsp;·&nbsp;
+  <a href="#-metis-vs-deepseek-r1-vs-gemini-thinking">Comparison</a> &nbsp;·&nbsp;
   <a href="#-what-metis-actually-does--12-capabilities">12 Capabilities</a> &nbsp;·&nbsp;
-  <a href="#-who-needs-metis--every-ai-system-ever-built">Who Needs It</a> &nbsp;·&nbsp;
   <a href="#-quick-start">Quick Start</a> &nbsp;·&nbsp;
   <a href="#-architecture">Architecture</a> &nbsp;·&nbsp;
-  <a href="#-the-math-behind-the-magic">The Math</a> &nbsp;·&nbsp;
   <a href="#-cognitive-reward-training--the-end-of-llm-as-judge">Training</a> &nbsp;·&nbsp;
   <a href="#-api-reference">API</a>
 </p>
@@ -65,6 +65,36 @@ METIS is not another model. Not a fine-tune. Not a prompt trick. It is a **cogni
 **Zero extra inference. Zero model modification. O(1) per token. Works with any HuggingFace causal LM.**
 
 This is not an incremental improvement. This is a **phase transition** — the same kind of leap that operating systems brought to raw hardware, that compilers brought to machine code. METIS transforms raw language models into **cognitively self-aware reasoning systems**.
+
+---
+
+# 🔴 The Core Problem: AI Has No Idea What It Doesn't Know
+
+This is not a theoretical concern. It is the **#1 blocker** for every serious AI deployment on Earth right now.
+
+### The Hallucination Crisis
+
+- A lawyer used ChatGPT to prepare a brief. **It cited 6 cases that don't exist.** The lawyer was sanctioned.
+- A medical chatbot confidently prescribed a **nonexistent drug** for a real condition.
+- A coding assistant generated a function that calls an **API endpoint that was never part of any library.**
+- A financial model produced a market analysis referencing **events that never happened.**
+
+These aren't edge cases. They are the **default behavior** of every language model ever built. And they all share one root cause: the model has no mechanism to detect that it's fabricating.
+
+### Why "Just Scale More" Doesn't Fix This
+
+| Approach | Why It Fails |
+|:---|:---|
+| **More parameters** | GPT-4 hallucinates. So does Claude. So does Gemini. Scale doesn't create self-awareness. |
+| **Better training data** | You can't train away the unknown — the model will always encounter questions outside its distribution. |
+| **RLHF / Instruction tuning** | Teaches "sound confident" not "know your limits." Optimizes for human preference, not epistemic accuracy. |
+| **Prompt engineering** | "Please don't hallucinate" has exactly the effectiveness you'd expect. |
+| **RAG** | Helps when you retrieve the right docs. Doesn't help the model know WHEN to retrieve. |
+| **Chain-of-Thought** | Makes the model show its work. Doesn't tell it WHEN to activate deeper reasoning. |
+
+**The missing piece isn't intelligence. It's metacognition.** The ability to think about thinking. To monitor your own cognitive process in real-time. To feel the boundary between knowledge and fabrication as it happens, token by token.
+
+That's what METIS is.
 
 ---
 
@@ -216,35 +246,6 @@ These details demonstrate **devil-level engineering** beyond the high-level arch
 
 ---
 
-# 🔴 The Core Problem: AI Has No Idea What It Doesn't Know
-
-This is not a theoretical concern. It is the **#1 blocker** for every serious AI deployment on Earth right now.
-
-### The Hallucination Crisis
-
-- A lawyer used ChatGPT to prepare a brief. **It cited 6 cases that don't exist.** The lawyer was sanctioned.
-- A medical chatbot confidently prescribed a **nonexistent drug** for a real condition.
-- A coding assistant generated a function that calls an **API endpoint that was never part of any library.**
-- A financial model produced a market analysis referencing **events that never happened.**
-
-These aren't edge cases. They are the **default behavior** of every language model ever built. And they all share one root cause: the model has no mechanism to detect that it's fabricating.
-
-### Why "Just Scale More" Doesn't Fix This
-
-| Approach | Why It Fails |
-|:---|:---|
-| **More parameters** | GPT-4 hallucinates. So does Claude. So does Gemini. Scale doesn't create self-awareness. |
-| **Better training data** | You can't train away the unknown — the model will always encounter questions outside its distribution. |
-| **RLHF / Instruction tuning** | Teaches "sound confident" not "know your limits." Optimizes for human preference, not epistemic accuracy. |
-| **Prompt engineering** | "Please don't hallucinate" has exactly the effectiveness you'd expect. |
-| **RAG** | Helps when you retrieve the right docs. Doesn't help the model know WHEN to retrieve. |
-| **Chain-of-Thought** | Makes the model show its work. Doesn't tell it WHEN to activate deeper reasoning. |
-
-**The missing piece isn't intelligence. It's metacognition.** The ability to think about thinking. To monitor your own cognitive process in real-time. To feel the boundary between knowledge and fabrication as it happens, token by token.
-
-That's what METIS is.
-
----
 
 # ✨ What METIS Actually Does — 12 Capabilities
 
