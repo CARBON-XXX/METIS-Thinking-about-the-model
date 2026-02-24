@@ -459,9 +459,13 @@ pairs.export_dpo("cognitive_dpo_train.jsonl")  # TRL-compatible
 ### Install
 
 ```bash
-git clone https://github.com/CARBON-XXX/METIS-Thinking-about-the-model.git
-cd METIS-Thinking-about-the-model
-pip install -r requirements.txt
+$ git clone https://github.com/CARBON-XXX/METIS-Thinking-about-the-model.git
+Cloning into 'METIS-Thinking-about-the-model'...
+resolving deltas: 100% (142/142), done.
+
+$ cd METIS-Thinking-about-the-model
+$ pip install -r requirements.txt
+Successfully installed torch transformers peft trl ...
 ```
 
 ### 3 Lines to Cognitive Awareness
@@ -499,12 +503,8 @@ gaps = metis.end_session()      # list[KnowledgeGap]: recorded confusion for sel
 ### CLI
 
 ```bash
-python -m metis info                                         # system diagnostics
-python -m metis attach --model Qwen/Qwen2.5-1.5B-Instruct   # interactive session
-python -m metis experiment --n-prompts 300                   # full training experiment
-```
+$ python -m metis info
 
-```
 ███╗   ███╗███████╗████████╗██╗███████╗
 ████╗ ████║██╔════╝╚══██╔══╝██║██╔════╝
 ██╔████╔██║█████╗     ██║   ██║███████╗
@@ -519,20 +519,107 @@ python -m metis experiment --n-prompts 300                   # full training exp
  > CURIOSITY_DRIVER......[LISTENING]
  > METACOGNITIVE_CORE....[READY]
  > SYSTEM_2_STATUS.......[STANDBY]
+
+ root@agi:~$ Initializing Metacognitive Core...
+
+  Package version : 10.0.0
+  CLI version     : 10.0.1-alpha
+  PyTorch         : 2.2.0
+  CUDA            : ✓ (NVIDIA GeForce RTX 4090)
+  VRAM            : 24.0 GB
+  Transformers    : 4.38.0
+```
+
+```bash
+$ python -m metis attach --model Qwen/Qwen2.5-1.5B-Instruct --thinking
+
+███╗   ███╗███████╗████████╗██╗███████╗
+...
+  Loading model: Qwen/Qwen2.5-1.5B-Instruct
+  Device: cuda
+
+  ✓ METIS attached successfully.
+  Type your prompt, or /quit to exit.
+
+  metis> What is the speed of light?
+
+  The speed of light in a vacuum is approximately 299,792,458 meters per second.
+
+  [tokens=24 entropy=0.312 confidence=94.2% system2=0.0% hedged=False refused=False]
+
+  metis> /quit
+  Goodbye.
+```
+
+```bash
+$ python -m metis experiment --n-prompts 300 --n-samples 8
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║          METIS Training Experiment                          ║
+  ║          Cognitive Rewards vs Random Baseline               ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  Model:    Qwen/Qwen2.5-1.5B-Instruct
+  Device:   cuda
+  Prompts:  300 train + 50 eval
+  Samples:  8 per prompt
+
+[INFO] PHASE 1: Generate & Score (300 prompts × 8 samples)
+[INFO] [1/300] Explain quantum entanglement in simple terms...
+[INFO] [Generator] Sample 1/8 (temp=0.62)
+[INFO] [Generator] Sample 2/8 (temp=0.64)
+...
 ```
 
 ### Interactive Demo
 
 ```bash
-python demo_metis.py
-```
+$ python demo_metis.py
 
-```
+███╗   ███╗███████╗████████╗██╗███████╗
+████╗ ████║██╔════╝╚══██╔══╝██║██╔════╝
+██╔████╔██║█████╗     ██║   ██║███████╗
+██║╚██╔╝██║██╔══╝     ██║   ██║╚════██║
+██║ ╚═╝ ██║███████╗   ██║   ██║███████║
+╚═╝     ╚═╝╚══════╝   ╚═╝   ╚═╝╚══════╝
+
+ [SYSTEM::METIS] Cognitive Visualization Demo
+ Loading model: Qwen/Qwen2.5-1.5B-Instruct...
+ ✓ Model loaded. METIS attached.
+
 [METIS think=OFF max=200]> What is 2+2?
-  [  1] F FLU H=0.03 z=+0.00 ########## greedy  GENERATE 'The'
-  [  2] F FLU H=0.01 z=+0.00 ########## greedy  GENERATE ' answer'
-  [  3] F FLU H=0.00 z=+0.00 ########## greedy  GENERATE ' is'
-  [  4] F FLU H=0.00 z=+0.00 ########## greedy  GENERATE ' 4'
+
+  >> METIS Cognitive Monitoring Active
+  ┌─────┬───────┬───────┬───────┬────────────┬──────────┬───────────┬─────────┐
+  │ #   │ Dec   │ Phase │ H     │ z-score    │ Conf Bar │ Sampling  │ Action  │
+  ├─────┼───────┼───────┼───────┼────────────┼──────────┼───────────┼─────────┤
+  │   1 │ FAST  │ FLU   │ 0.03  │ +0.00      │ ████████ │ greedy    │ GENERATE│ 'The'
+  │   2 │ FAST  │ FLU   │ 0.01  │ +0.00      │ ████████ │ greedy    │ GENERATE│ ' answer'
+  │   3 │ FAST  │ FLU   │ 0.00  │ +0.00      │ ████████ │ greedy    │ GENERATE│ ' is'
+  │   4 │ FAST  │ FLU   │ 0.00  │ +0.00      │ ████████ │ greedy    │ GENERATE│ ' 4'
+  │   5 │ FAST  │ FLU   │ 0.02  │ +0.01      │ ████████ │ greedy    │ GENERATE│ '.'
+  └─────┴───────┴───────┴───────┴────────────┴──────────┴───────────┴─────────┘
+
+  >> Generation Complete
+  Text: "The answer is 4."
+  Tokens: 5 | Latency: 127ms | System 1: 100% | Hedged: No | Refused: No
+
+[METIS think=OFF max=200]> /think
+  Thinking Protocol: ON
+
+[METIS think=ON max=200]> Explain why the sky is blue
+
+  >> METIS Cognitive Monitoring Active (Thinking Protocol Enabled)
+  ┌─────┬───────┬───────┬───────┬────────────┬──────────┬───────────┬─────────┐
+  │   1 │ FAST  │ FLU   │ 0.12  │ +0.05      │ ███████░ │ greedy    │ GENERATE│ '<thinking>'
+  │   2 │ NORM  │ REA   │ 0.45  │ +0.32      │ ██████░░ │ temp=0.7  │ GENERATE│ 'The'
+  │   3 │ NORM  │ REA   │ 0.38  │ +0.21      │ ██████░░ │ temp=0.7  │ GENERATE│ ' sky'
+  │ ... │       │       │       │            │          │           │         │
+  │  47 │ FAST  │ REC   │ 0.08  │ -0.12      │ ████████ │ greedy    │ GENERATE│ '</thinking>'
+  └─────┴───────┴───────┴───────┴────────────┴──────────┴───────────┴─────────┘
+
+[METIS think=ON max=200]> /quit
+  Goodbye.
 ```
 
 ---
