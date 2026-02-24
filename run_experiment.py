@@ -1153,11 +1153,10 @@ def phase4_report(
         color = C.GREEN if d > 0 else C.RED
         return f"{color}{d:+.4f}{C.RESET}"
 
-    print(f"\n{C.BOLD}{C.CYAN}")
-    print(f"  ╔══════════════════════════════════════════════════════════════╗")
-    print(f"  ║           METIS Training Experiment — Results               ║")
-    print(f"  ╚══════════════════════════════════════════════════════════════╝")
-    print(f"{C.RESET}")
+    print(f"""
+ {C.BOLD}[SYSTEM::METIS]{C.RESET} {C.CYAN}Experiment Results{C.RESET}
+ {C.DIM}═══════════════════════════════════════════════════════════════{C.RESET}
+""")
 
     print(f"  {C.BOLD}Model:{C.RESET} {config.model_name}")
     print(f"  {C.BOLD}Train:{C.RESET} {config.n_train_prompts} prompts × {config.n_samples_per_prompt} samples")
@@ -1387,17 +1386,30 @@ def main():
 
     os.makedirs(config.output_dir, exist_ok=True)
 
-    print(f"\n{C.BOLD}{C.CYAN}")
-    print(f"  ╔══════════════════════════════════════════════════════════════╗")
-    print(f"  ║          METIS Training Experiment                          ║")
-    print(f"  ║          Cognitive Rewards vs Random Baseline               ║")
-    print(f"  ╚══════════════════════════════════════════════════════════════╝")
-    print(f"{C.RESET}")
-    print(f"  Model:    {config.model_name}")
-    print(f"  Device:   {config.device}")
-    print(f"  Prompts:  {config.n_train_prompts} train + {config.n_eval_prompts} eval")
-    print(f"  Samples:  {config.n_samples_per_prompt} per prompt")
-    print(f"  Output:   {config.output_dir}\n")
+    print(f"""{C.GREEN}
+███╗   ███╗███████╗████████╗██╗███████╗
+████╗ ████║██╔════╝╚══██╔══╝██║██╔════╝
+██╔████╔██║█████╗     ██║   ██║███████╗
+██║╚██╔╝██║██╔══╝     ██║   ██║╚════██║
+██║ ╚═╝ ██║███████╗   ██║   ██║███████║
+╚═╝     ╚═╝╚══════╝   ╚═╝   ╚═╝╚══════╝
+{C.RESET}
+ {C.BOLD}[SYSTEM::METIS]{C.RESET} {C.CYAN}Training Experiment{C.RESET}
+ {C.DIM}Cognitive Rewards vs Random Baseline{C.RESET}
+
+ > COGNITIVE_LAYER.......[{C.GREEN}ONLINE{C.RESET}]
+ > REWARD_COMPUTER.......[{C.GREEN}ACTIVE{C.RESET}]
+ > DPO_TRAINER...........[{C.YELLOW}STANDBY{C.RESET}]
+ > EVAL_PIPELINE.........[{C.YELLOW}STANDBY{C.RESET}]
+
+ root@agi:~$ {C.GREEN}Initializing Experiment...{C.RESET}
+
+  Model:    {config.model_name}
+  Device:   {config.device}
+  Prompts:  {config.n_train_prompts} train + {config.n_eval_prompts} eval
+  Samples:  {config.n_samples_per_prompt} per prompt
+  Output:   {config.output_dir}
+""")
 
     start = time.time()
 

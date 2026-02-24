@@ -462,15 +462,24 @@ def main():
     if sys.platform == 'win32':
         os.system('')
 
-    print(f"""
-{C.BOLD}{C.CYAN}
-  +==========================================================+
-  |  METIS - Metacognitive Entropy-driven Thinking           |
-  |          & Introspection System                          |
-  |                                                          |
-  |  Interactive Cognitive Process Visualization              |
-  +==========================================================+
-{C.RESET}""")
+    print(f"""{C.GREEN}
+███╗   ███╗███████╗████████╗██╗███████╗
+████╗ ████║██╔════╝╚══██╔══╝██║██╔════╝
+██╔████╔██║█████╗     ██║   ██║███████╗
+██║╚██╔╝██║██╔══╝     ██║   ██║╚════██║
+██║ ╚═╝ ██║███████╗   ██║   ██║███████║
+╚═╝     ╚═╝╚══════╝   ╚═╝   ╚═╝╚══════╝
+{C.RESET}
+ {C.BOLD}[SYSTEM::METIS]{C.RESET} {C.CYAN}Cognitive Visualization Demo{C.RESET}
+ {C.DIM}Metacognitive Entropy-driven Thinking & Introspection System{C.RESET}
+
+ > COGNITIVE_LAYER.......[{C.GREEN}ONLINE{C.RESET}]
+ > ENTROPY_MONITOR.......[{C.GREEN}ACTIVE{C.RESET}]
+ > BOUNDARY_GUARD........[{C.GREEN}ARMED{C.RESET}]
+ > SYSTEM_2_STATUS.......[{C.YELLOW}STANDBY{C.RESET}]
+
+ root@agi:~$ {C.GREEN}Initializing Demo...{C.RESET}
+""")
 
     model, tokenizer = load_model()
 

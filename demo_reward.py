@@ -311,12 +311,24 @@ def demo_pipeline_summary():
 # ─────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"\n{C.BOLD}{C.CYAN}")
-    print(f"  ╔══════════════════════════════════════════════════════════╗")
-    print(f"  ║   METIS — Cognitive Reward Training Pipeline Demo       ║")
-    print(f"  ║   Information-Theoretic Rewards for GRPO / DPO / KTO   ║")
-    print(f"  ╚══════════════════════════════════════════════════════════╝")
-    print(f"{C.RESET}")
+    print(f"""{C.GREEN}
+███╗   ███╗███████╗████████╗██╗███████╗
+████╗ ████║██╔════╝╚══██╔══╝██║██╔════╝
+██╔████╔██║█████╗     ██║   ██║███████╗
+██║╚██╔╝██║██╔══╝     ██║   ██║╚════██║
+██║ ╚═╝ ██║███████╗   ██║   ██║███████║
+╚═╝     ╚═╝╚══════╝   ╚═╝   ╚═╝╚══════╝
+{C.RESET}
+ {C.BOLD}[SYSTEM::METIS]{C.RESET} {C.CYAN}Cognitive Reward Demo{C.RESET}
+ {C.DIM}Information-Theoretic Rewards for GRPO / DPO / KTO{C.RESET}
+
+ > REWARD_COMPUTER.......[{C.GREEN}ONLINE{C.RESET}]
+ > GRPO_RANKER...........[{C.GREEN}ACTIVE{C.RESET}]
+ > DPO_GENERATOR.........[{C.GREEN}READY{C.RESET}]
+ > KTO_CLASSIFIER........[{C.GREEN}READY{C.RESET}]
+
+ root@agi:~$ {C.GREEN}Initializing Demo...{C.RESET}
+""")
 
     demo_reward_components()
     demo_reward_bars()
