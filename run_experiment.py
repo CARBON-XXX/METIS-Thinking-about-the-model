@@ -472,7 +472,7 @@ class ExperimentConfig:
     dpo_epochs: int = 2
     dpo_learning_rate: float = 1e-6     # Moderate: enough signal to cross KL barrier
     dpo_batch_size: int = 2              # Effective batch = 16 with accum=8
-    dpo_beta: float = 0.35              # Higher beta = stronger KL constraint vs reference
+    dpo_beta: float = 0.1               # Lower beta = more freedom to deviate from ref model
     dpo_max_length: int = 384
     gradient_checkpointing: bool = True
     dpo_gradient_accumulation: int = 8   # Effective batch = 8
@@ -865,7 +865,7 @@ def _train_dpo(
         lora_alpha=config.lora_alpha,
         lora_dropout=config.lora_dropout,
         task_type=TaskType.CAUSAL_LM,
-        target_modules=["q_proj", "v_proj"],
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
 
     train_model = get_peft_model(base_model, lora_config)
