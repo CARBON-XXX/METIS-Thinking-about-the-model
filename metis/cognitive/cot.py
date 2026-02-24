@@ -24,6 +24,16 @@ import collections
 
 from ..core.types import CognitiveSignal, Decision, CoTStrategy, BoundaryAction
 
+# ── Rust native acceleration (optional) ──
+try:
+    from metis_native import CotCusumNative as _NativeCotCusum
+    _HAS_NATIVE = True
+except ImportError:
+    _HAS_NATIVE = False
+
+_STRATEGY_FROM_INT = [CoTStrategy.STANDARD, CoTStrategy.REFLECTION, CoTStrategy.DECOMPOSITION, CoTStrategy.CLARIFICATION]
+_DECISION_TO_INT = {Decision.FAST: 0, Decision.NORMAL: 1, Decision.DEEP: 2}
+
 # =============================================================
 # CUSUM parameters for cognitive difficulty detection
 # =============================================================
@@ -114,11 +124,39 @@ class CoTManager:
         self._total_injections: int = 0
         self._last_strategy: CoTStrategy = CoTStrategy.NONE
 
+        # Rust native accelerator (if available)
+        self._native = None
+        if _HAS_NATIVE:
+            self._native = _NativeCotCusum(
+                cooldown=cooldown_steps,
+                max_inj=max_injections,
+                cusum_k=COT_CUSUM_K,
+                cusum_h=COT_CUSUM_H,
+                cusum_decay=COT_CUSUM_DECAY,
+                deep_bonus=COT_DEEP_BONUS,
+                momentum_h=COT_MOMENTUM_H,
+                osc_window=OSCILLATION_WINDOW,
+                osc_threshold=OSCILLATION_THRESHOLD,
+            )
+
     def observe(self, signal: CognitiveSignal) -> None:
         """
         Called each step to update internal state.
         Must be called before should_inject / select_strategy.
         """
+        # Rust fast path
+        if self._native is not None:
+            dec_int = _DECISION_TO_INT.get(signal.decision, 1)
+            self._native.observe(
+                signal.z_score, signal.semantic_diversity,
+                dec_int, signal.entropy_momentum,
+            )
+            # Keep Python-side last_strategy tracking
+            self._steps_since_last_cot = self._native.steps_since_last_cot
+            self._total_injections = self._native.total_injections
+            return
+
+        # Python fallback
         # Strategy selection tracking
         self._decision_history.append(signal.decision)
         if signal.decision == Decision.DEEP:
@@ -160,6 +198,9 @@ class CoTManager:
         Single trigger: difficulty CUSUM >= threshold.
         Constrained by cooldown and injection count limits.
         """
+        if self._native is not None:
+            return self._native.should_inject()
+
         if self._total_injections >= self._max_injections:
             return False
 
@@ -193,6 +234,13 @@ class CoTManager:
         3. CLARIFICATION — high diversity + low confidence (conceptual ambiguity)
         4. STANDARD — generic high entropy
         """
+        if self._native is not None:
+            phase = signal.cognitive_phase if signal.cognitive_phase else ""
+            idx = self._native.select_strategy(
+                signal.semantic_diversity, signal.confidence, phase
+            )
+            return _STRATEGY_FROM_INT[idx]
+
         phase = signal.cognitive_phase
 
         # 1. Oscillation or CONFUSION phase: model is stuck, needs self-reflection
@@ -221,6 +269,8 @@ class CoTManager:
         self._momentum_acc = 0.0
         self._momentum_steps = 0
         self._last_strategy = strategy
+        if self._native is not None:
+            self._native.record_injection()
 
     def reset(self) -> None:
         """Reset session state (called at start of new session)"""
@@ -232,6 +282,8 @@ class CoTManager:
         self._steps_since_last_cot = self._cooldown_steps  # Allow first injection
         self._total_injections = 0
         self._last_strategy = CoTStrategy.NONE
+        if self._native is not None:
+            self._native.reset()
 
     def _detect_oscillation(self) -> bool:
         """
@@ -255,6 +307,17 @@ class CoTManager:
 
     @property
     def stats(self) -> dict:
+        if self._native is not None:
+            return {
+                "total_injections": self._native.total_injections,
+                "difficulty_cusum": round(self._native.difficulty_cusum_val, 2),
+                "momentum_acc": round(self._native.momentum_acc_val, 2),
+                "momentum_steps": 0,
+                "consecutive_deep": self._native.consecutive_deep,
+                "steps_since_last_cot": self._native.steps_since_last_cot,
+                "last_strategy": self._last_strategy.value,
+                "remaining_budget": self._native.remaining_budget,
+            }
         return {
             "total_injections": self._total_injections,
             "difficulty_cusum": round(self._difficulty_cusum, 2),

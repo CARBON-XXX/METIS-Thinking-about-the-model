@@ -10,6 +10,10 @@
 use pyo3::prelude::*;
 use std::collections::HashSet;
 
+mod boundary;
+mod controller;
+mod cot;
+
 // ─────────────────────────────────────────────────────────
 // 1. Repetition Detection (Jaccard + Positional Fuzzy)
 // ─────────────────────────────────────────────────────────
@@ -224,12 +228,30 @@ impl SlidingWindowStats {
 }
 
 // ─────────────────────────────────────────────────────────
+// Standalone functions
+// ─────────────────────────────────────────────────────────
+
+/// Cornish-Fisher expansion: non-Gaussian quantile adjustment.
+///
+/// z_adj = z + (z²-1)S/6 + (z³-3z)K/24
+#[pyfunction]
+fn cornish_fisher_quantile(z: f64, skew: f64, kurt: f64) -> f64 {
+    controller::cornish_fisher(z, skew, kurt)
+}
+
+// ─────────────────────────────────────────────────────────
 // Module registration
 // ─────────────────────────────────────────────────────────
 
 #[pymodule]
 fn metis_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Existing
     m.add_function(wrap_pyfunction!(detect_repetition_hybrid, m)?)?;
     m.add_class::<SlidingWindowStats>()?;
+    // Phase 1: new accelerators
+    m.add_function(wrap_pyfunction!(cornish_fisher_quantile, m)?)?;
+    m.add_class::<boundary::BoundaryGuardNative>()?;
+    m.add_class::<cot::CotCusumNative>()?;
+    m.add_class::<controller::AdaptiveControllerNative>()?;
     Ok(())
 }

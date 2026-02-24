@@ -13,6 +13,17 @@ from typing import Tuple, Optional, Callable, Dict, Any
 
 from ..core.types import EpistemicState, BoundaryAction, CognitiveSignal
 
+# ── Rust native acceleration (optional) ──
+try:
+    from metis_native import BoundaryGuardNative as _NativeBoundary
+    _HAS_NATIVE = True
+except ImportError:
+    _HAS_NATIVE = False
+
+# Enum lookup tables for Rust integer codes
+_STATE_FROM_INT = [EpistemicState.KNOWN, EpistemicState.LIKELY, EpistemicState.UNCERTAIN, EpistemicState.UNKNOWN]
+_ACTION_FROM_INT = [BoundaryAction.GENERATE, BoundaryAction.HEDGE, BoundaryAction.SEEK, BoundaryAction.REFUSE]
+
 # ── Constants ──
 Z_UNCERTAIN_DEFAULT = 0.8       # z > 0.8 → UNCERTAIN (lowered for short sequences)
 Z_UNKNOWN_DEFAULT = 1.2         # z > 1.2 → UNKNOWN (lowered for short sequences)
@@ -95,6 +106,25 @@ class EpistemicBoundaryGuard:
         self._action_counts: Dict[BoundaryAction, int] = {
             a: 0 for a in BoundaryAction
         }
+        
+        # Rust native accelerator (if available)
+        self._native = None
+        if _HAS_NATIVE:
+            self._native = _NativeBoundary(
+                uncertain_z=uncertain_z,
+                unknown_z=unknown_z,
+                known_z=known_z,
+                min_warmup=min_warmup_tokens,
+                cusum_k=CUSUM_K,
+                hedge_h=CUSUM_HEDGE_H,
+                refuse_h=CUSUM_REFUSE_H,
+                decay=CUSUM_DECAY,
+                surprise_base=SURPRISE_BASELINE,
+                surprise_w=SURPRISE_WEIGHT,
+                conf_refuse=CONFIDENCE_REFUSE,
+                conf_seek=CONFIDENCE_SEEK,
+                conf_known=CONFIDENCE_KNOWN,
+            )
     
     def evaluate(
         self, 
@@ -116,6 +146,18 @@ class EpistemicBoundaryGuard:
         sd = signal.semantic_diversity
         self._token_count += 1
         
+        # ── Rust fast path ──
+        if self._native is not None:
+            z_unc_arg = thresholds[0] if thresholds else None
+            z_unk_arg = thresholds[1] if thresholds else None
+            state_i, action_i, explanation = self._native.evaluate(
+                z, c, sd, z_unc_arg, z_unk_arg
+            )
+            state = _STATE_FROM_INT[state_i]
+            action = _ACTION_FROM_INT[action_i]
+            return self._emit(state, action, explanation)
+        
+        # ── Python fallback ──
         # Thresholds for epistemic state classification
         z_unc = thresholds[0] if thresholds else self._uncertain_z
         z_unk = thresholds[1] if thresholds else self._unknown_z
@@ -192,9 +234,13 @@ class EpistemicBoundaryGuard:
         1-step lag: this surprise affects the NEXT evaluate() call.
         """
         self._last_surprise = surprise
+        if self._native is not None:
+            self._native.feed_surprise(surprise)
 
     def get_uncertainty_score(self) -> float:
         """Get CUSUM-based uncertainty score (higher = more uncertain)"""
+        if self._native is not None:
+            return self._native.uncertainty_score
         return self._cusum
     
     def set_on_action(self, callback: Callable[[BoundaryAction, str], None]) -> None:
@@ -229,3 +275,5 @@ class EpistemicBoundaryGuard:
         self._last_surprise = 0.0
         self._token_count = 0
         self._action_counts = {a: 0 for a in BoundaryAction}
+        if self._native is not None:
+            self._native.reset()

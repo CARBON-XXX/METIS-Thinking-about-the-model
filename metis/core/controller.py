@@ -17,6 +17,15 @@ from typing import Optional, List, Dict, Tuple
 from .types import Decision, ControllerConfig
 from .statistics import SlidingWindowStats
 
+# ── Rust native acceleration (optional) ──
+try:
+    from metis_native import AdaptiveControllerNative as _NativeController
+    _HAS_NATIVE = True
+except ImportError:
+    _HAS_NATIVE = False
+
+_DECISION_FROM_INT = [Decision.FAST, Decision.NORMAL, Decision.DEEP]
+
 
 class AdaptiveController:
     """
@@ -115,6 +124,20 @@ class AdaptiveController:
         self._circuit_breaker = False
         self._decision_history = collections.deque(maxlen=50)
 
+        # ── Rust native accelerator (if available) ──
+        self._native = None
+        if _HAS_NATIVE:
+            self._native = _NativeController(
+                window_size=c.window_size,
+                forgetting_factor=c.forgetting_factor,
+                cusum_k=c.cusum_k,
+                target_arl0=c.target_arl0,
+                cost_ratio=c.cost_ratio,
+                min_samples=c.min_samples,
+                cold_start_mean=c.cold_start_entropy_mean,
+                cold_start_std=c.cold_start_entropy_std,
+            )
+
     # ═══════════════════════════════════════════════════════════════
     # Public API
     # ═══════════════════════════════════════════════════════════════
@@ -127,6 +150,11 @@ class AdaptiveController:
             entropy: Current token's semantic entropy
             confidence: Current token's confidence (optional)
         """
+        # Rust fast path
+        if self._native is not None:
+            self._native.update(entropy, confidence)
+            return
+
         with self._lock:
             self._step_count += 1
 
@@ -214,6 +242,10 @@ class AdaptiveController:
             Decision.NORMAL -> Standard reasoning
             Decision.DEEP  -> System 2: deliberate reasoning
         """
+        # Rust fast path
+        if self._native is not None:
+            return _DECISION_FROM_INT[self._native.decide(entropy, confidence)]
+
         with self._lock:
             self._update_circuit_breaker_check()
 
@@ -268,6 +300,9 @@ class AdaptiveController:
         Returns:
             (z_uncertain, z_unknown)
         """
+        if self._native is not None:
+            return self._native.get_dynamic_z_thresholds()
+
         with self._lock:
             estats = self._entropy_stats.get_stats()
             # If too few samples, fall back to default normal distribution thresholds
@@ -306,6 +341,8 @@ class AdaptiveController:
         Returns the SAME z-score used internally by CUSUM/Bayesian posterior.
         This ensures boundary guard decisions are consistent with internal signals.
         """
+        if self._native is not None:
+            return self._native.get_z_score(entropy)
         if self._step_count > 0:
             # Return value already computed in update() (consistent with CUSUM)
             return self._last_z_score
@@ -317,6 +354,9 @@ class AdaptiveController:
 
     def reset_session(self) -> None:
         """Reset session state (preserve learned thresholds)"""
+        if self._native is not None:
+            self._native.reset_session()
+            return
         self._consecutive_high = 0
         self._cusum_pos = 0
         self._cusum_neg = 0
@@ -327,6 +367,8 @@ class AdaptiveController:
     @property
     def stats(self) -> Dict[str, float]:
         """Export complete statistics"""
+        if self._native is not None:
+            return self._native.stats
         estats = self._entropy_stats.get_stats()
         return {
             "entropy_mean": estats["mean"],
@@ -354,6 +396,8 @@ class AdaptiveController:
             - gradient: instantaneous d(entropy)/dt
             - momentum: EMA of gradient (captures acceleration/deceleration)
         """
+        if self._native is not None:
+            return self._native.get_predictive_signals()
         return self._entropy_gradient, self._entropy_momentum
 
     # ═══════════════════════════════════════════════════════════════
