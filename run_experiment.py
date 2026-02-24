@@ -465,7 +465,7 @@ class ExperimentConfig:
 
     # Generation
     n_samples_per_prompt: int = 8       # More samples = better pair selection
-    max_new_tokens: int = 200
+    max_new_tokens: int = 512
     temperature: float = 0.7
 
     # Training
@@ -473,7 +473,7 @@ class ExperimentConfig:
     dpo_learning_rate: float = 1e-6     # Moderate: enough signal to cross KL barrier
     dpo_batch_size: int = 2              # Effective batch = 16 with accum=8
     dpo_beta: float = 0.1               # Lower beta = more freedom to deviate from ref model
-    dpo_max_length: int = 384
+    dpo_max_length: int = 768
     gradient_checkpointing: bool = True
     dpo_gradient_accumulation: int = 8   # Effective batch = 8
     lora_r: int = 16
@@ -481,7 +481,7 @@ class ExperimentConfig:
     lora_dropout: float = 0.05
 
     # Evaluation
-    eval_max_tokens: int = 200
+    eval_max_tokens: int = 512
     eval_temperature: float = 0.7        # Match generation temp to prevent base model degeneration
 
     # Prompts
