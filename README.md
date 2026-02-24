@@ -68,6 +68,52 @@ This is not an incremental improvement. This is a **phase transition** — the s
 
 ---
 
+# 🧠 What Does METIS "Thinking" Mean?
+
+METIS doesn't have brainwaves. It **simulates the computational process of human deliberation** — what cognitive scientists call **System 2 (slow thinking)**. This manifests in three concrete mechanisms:
+
+### 1. Inhibitory Control — "Stop Before You Speak"
+
+| Ordinary AI | METIS |
+|:---|:---|
+| Reflex response — sees question, immediately outputs tokens (Greedy Decoding) | Monitors **semantic entropy** in real-time. When uncertainty spikes, METIS **hits the brakes** (Stop Generation). |
+
+**Why this matters**: The ability to *not* blurt out the first thing that comes to mind is the foundation of all deliberate thought.
+
+### 2. Counterfactual Simulation — "What If I Said This Instead?"
+
+| Ordinary AI | METIS |
+|:---|:---|
+| One path, no alternatives | Spawns **multi-path sampling** in the background |
+
+METIS generates 5, 10, or more candidate continuations simultaneously. For each path, it computes:
+- **Logical coherence** (entropy stability)
+- **Confidence calibration** (does the model believe what it's saying?)
+- **Epistemic risk** (is this path heading toward hallucination?)
+
+This is the AI equivalent of a human thinking: *"If I say X, what happens? What about Y? Which answer holds up better?"*
+
+### 3. Recursive Self-Correction — "Wait, Let Me Double-Check"
+
+| Ordinary AI | METIS |
+|:---|:---|
+| Once generated, cannot unsay. Keeps building on potentially flawed reasoning. | Injects **Chain-of-Thought** checkpoints. Forces model to output *"Wait, let me verify..."* |
+
+When METIS detects rising entropy or confidence-surprise divergence, it triggers:
+1. **Pause** — Stop generation at a natural boundary
+2. **Reflect** — Model examines its own reasoning for gaps
+3. **Correct** — If flaws detected, roll back and regenerate
+
+This **"question yourself → fix yourself"** loop is the highest form of thinking.
+
+---
+
+> **One-sentence summary for humans:**
+> 
+> *"METIS makes AI rehearse every possibility in its head before speaking — then only tells you the answer it's most confident in."*
+
+---
+
 # 🔴 The Core Problem: AI Has No Idea What It Doesn't Know
 
 This is not a theoretical concern. It is the **#1 blocker** for every serious AI deployment on Earth right now.
