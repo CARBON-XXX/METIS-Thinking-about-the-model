@@ -8,8 +8,21 @@ import type {
   DashboardState,
 } from "@/lib/types";
 
+/** Reward breakdown from Python reward computer */
+export interface RewardEntry {
+  total: number;
+  coherence: number;
+  calibration: number;
+  phase_quality: number;
+  epistemic_honesty: number;
+  efficiency: number;
+  promptIndex: number;
+  sampleIndex: number;
+  responsePreview: string;
+}
+
 /** Raw message from Python SignalBridge WebSocket */
-interface BridgeMessage {
+interface BridgeSignalMessage {
   type: "signal";
   signal: CognitiveSignal;
   controller: ControllerStats;
@@ -22,12 +35,28 @@ interface BridgeMessage {
   };
 }
 
+interface BridgeRewardMessage {
+  type: "reward";
+  reward: Record<string, number>;
+  meta: {
+    prompt_index: number;
+    sample_index: number;
+    total_prompts: number;
+    current_prompt: string;
+    response_preview: string;
+  };
+}
+
+type BridgeMessage = BridgeSignalMessage | BridgeRewardMessage;
+
 interface SignalStreamState extends DashboardState {
   promptIndex: number;
   sampleIndex: number;
   totalPrompts: number;
   currentPrompt: string;
   trainingPhase: string;
+  rewardHistory: RewardEntry[];
+  lastReward: RewardEntry | null;
 }
 
 const INITIAL_STATE: SignalStreamState = {
@@ -42,6 +71,8 @@ const INITIAL_STATE: SignalStreamState = {
   totalPrompts: 300,
   currentPrompt: "",
   trainingPhase: "waiting",
+  rewardHistory: [],
+  lastReward: null,
 };
 
 export function useSignalStream(url = "ws://localhost:8765"): SignalStreamState {
@@ -73,6 +104,28 @@ export function useSignalStream(url = "ws://localhost:8765"): SignalStreamState 
       ws.onmessage = (event: MessageEvent) => {
         try {
           const msg: BridgeMessage = JSON.parse(event.data as string);
+
+          if (msg.type === "reward") {
+            const r = msg.reward;
+            const entry: RewardEntry = {
+              total: r.total ?? 0,
+              coherence: r.coherence ?? 0,
+              calibration: r.calibration ?? 0,
+              phase_quality: r.phase_quality ?? 0,
+              epistemic_honesty: r.epistemic_honesty ?? 0,
+              efficiency: r.efficiency ?? 0,
+              promptIndex: msg.meta.prompt_index,
+              sampleIndex: msg.meta.sample_index,
+              responsePreview: msg.meta.response_preview ?? "",
+            };
+            setState((prev) => ({
+              ...prev,
+              rewardHistory: [...prev.rewardHistory.slice(-199), entry],
+              lastReward: entry,
+            }));
+            return;
+          }
+
           if (msg.type !== "signal") return;
 
           const sig = msg.signal;

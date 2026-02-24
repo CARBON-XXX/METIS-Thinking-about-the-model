@@ -13,6 +13,7 @@ use std::collections::HashSet;
 mod boundary;
 mod controller;
 mod cot;
+mod rewards;
 
 // ─────────────────────────────────────────────────────────
 // 1. Repetition Detection (Jaccard + Positional Fuzzy)
@@ -253,5 +254,6 @@ fn metis_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<boundary::BoundaryGuardNative>()?;
     m.add_class::<cot::CotCusumNative>()?;
     m.add_class::<controller::AdaptiveControllerNative>()?;
+    m.add_class::<rewards::RewardComputerNative>()?;
     Ok(())
 }

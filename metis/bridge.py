@@ -120,6 +120,27 @@ class SignalBridge:
         except Exception as e:
             logger.debug(f"[Bridge] Signal serialization error: {e}")
 
+    def push_reward(self, reward_dict: Dict[str, float], sample_idx: int, text: str = "") -> None:
+        """Push reward breakdown after each sample completes."""
+        try:
+            msg = {
+                "type": "reward",
+                "reward": {k: round(v, 4) if isinstance(v, float) else v for k, v in reward_dict.items()},
+                "meta": {
+                    "prompt_index": self.prompt_index,
+                    "sample_index": sample_idx,
+                    "total_prompts": self.total_prompts,
+                    "current_prompt": self.current_prompt[:80],
+                    "response_preview": text[:100],
+                },
+            }
+            try:
+                self._queue.put_nowait(json.dumps(msg))
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"[Bridge] Reward serialization error: {e}")
+
     # ─── Internal ───
 
     def _run(self) -> None:

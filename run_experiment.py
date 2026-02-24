@@ -506,9 +506,6 @@ class EvalMetrics:
     # Per-prompt reward list (for statistical tests)
     per_prompt_rewards: List[float] = field(default_factory=list)
 
-    # Per-prompt reward list (for statistical tests)
-    per_prompt_rewards: List[float] = field(default_factory=list)
-
     # Raw signal metrics
     mean_entropy: float = 0.0
     mean_surprise: float = 0.0
@@ -611,6 +608,8 @@ def phase1_generate(
                 )
 
             reward = reward_computer.compute(trace)
+            if bridge is not None:
+                bridge.push_reward(reward.to_dict(), j, text)
             entry = {
                 "prompt": prompt,
                 "chat_prompt": chat_prompt,

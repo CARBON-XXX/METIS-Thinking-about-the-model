@@ -3,6 +3,7 @@
 import { useSignalStream } from "@/hooks/useSignalStream";
 import ECGCanvas from "@/components/ECGCanvas";
 import StatsPanel from "@/components/StatsPanel";
+import RewardPanel from "@/components/RewardPanel";
 import { PHASE_COLORS, DECISION_COLORS } from "@/lib/types";
 
 /** Decision history timeline (last 60 decisions) */
@@ -81,6 +82,8 @@ export default function DashboardPage() {
     totalPrompts,
     currentPrompt,
     trainingPhase,
+    rewardHistory,
+    lastReward,
   } = useSignalStream("ws://localhost:8765");
 
   const latest = signals.length > 0 ? signals[signals.length - 1] : null;
@@ -153,6 +156,9 @@ export default function DashboardPage() {
           </div>
           <DecisionTimeline signals={signals} />
         </section>
+
+        {/* Reward Breakdown */}
+        <RewardPanel lastReward={lastReward} rewardHistory={rewardHistory} />
 
         {/* Stats Panels */}
         <StatsPanel

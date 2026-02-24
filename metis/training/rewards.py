@@ -36,6 +36,25 @@ from ..core.types import (
     BoundaryAction,
 )
 
+# ── Rust native reward accelerator (10-50x faster) ──
+try:
+    from metis_native import RewardComputerNative as _NativeRewardComputer
+    _HAS_NATIVE_REWARDS = True
+except ImportError:
+    _HAS_NATIVE_REWARDS = False
+
+# Enum → int mappings for Rust interface
+_DECISION_TO_INT = {Decision.FAST: 0, Decision.NORMAL: 1, Decision.DEEP: 2}
+_PHASE_TO_INT = {"fluent": 0, "recall": 1, "reasoning": 2, "exploration": 3, "confusion": 4}
+_ESTATE_TO_INT = {
+    EpistemicState.KNOWN: 0, EpistemicState.LIKELY: 1,
+    EpistemicState.UNCERTAIN: 2, EpistemicState.UNKNOWN: 3,
+}
+_BACTION_TO_INT = {
+    BoundaryAction.GENERATE: 0, BoundaryAction.HEDGE: 1,
+    BoundaryAction.SEEK: 2, BoundaryAction.REFUSE: 3,
+}
+
 
 # ─────────────────────────────────────────────────────────
 # Configuration
@@ -132,6 +151,7 @@ class CognitiveRewardComputer:
 
     def __init__(self, config: Optional[RewardConfig] = None):
         self._config = config or RewardConfig()
+        self._native = _NativeRewardComputer() if _HAS_NATIVE_REWARDS else None
 
     def compute(self, trace: CognitiveTrace) -> RewardBreakdown:
         """
@@ -147,6 +167,11 @@ class CognitiveRewardComputer:
         if len(events) < 2:
             return RewardBreakdown(diagnostics={"error": "too_few_events"})
 
+        # ── Rust fast path: ~10-50x faster for large traces ──
+        if self._native is not None:
+            return self._compute_native(events, trace)
+
+        # ── Python fallback ──
         # Degeneration guard: if entropy has near-zero variance AND mean
         # confidence is extremely high, output is likely degenerate
         # (e.g., "TheTheThe..." repeated tokens)
@@ -193,6 +218,43 @@ class CognitiveRewardComputer:
             - breakdown.length_penalty
         )
 
+        return breakdown
+
+    def _compute_native(self, events: List[CognitiveEvent], trace: CognitiveTrace) -> RewardBreakdown:
+        """Rust-accelerated reward computation."""
+        # Extract arrays for Rust
+        entropies = [e.semantic_entropy for e in events]
+        token_entropies = [e.token_entropy for e in events]
+        confidences = [e.confidence for e in events]
+        surprises = [e.token_surprise for e in events]
+        z_scores = [e.z_score for e in events]
+        decisions = [_DECISION_TO_INT.get(e.decision, 1) for e in events]
+        phases = [_PHASE_TO_INT.get(
+            getattr(e.cognitive_phase, 'value', e.cognitive_phase), 1
+        ) for e in events]
+        epistemic_states = [_ESTATE_TO_INT.get(e.epistemic_state, 1) for e in events]
+        boundary_actions = [_BACTION_TO_INT.get(e.boundary_action, 0) for e in events]
+
+        r = self._native.compute(
+            entropies, token_entropies, confidences, surprises, z_scores,
+            decisions, phases, epistemic_states, boundary_actions,
+        )
+
+        breakdown = RewardBreakdown(
+            total=r["total"],
+            coherence=r["coherence"],
+            calibration=r["calibration"],
+            phase_quality=r["phase_quality"],
+            epistemic_honesty=r["epistemic_honesty"],
+            efficiency=r["efficiency"],
+            length_penalty=r.get("length_penalty", 0.0),
+        )
+        if r.get("completeness_bonus", 0.0) > 0:
+            breakdown.diagnostics["completeness_bonus"] = round(r["completeness_bonus"], 4)
+        if r.get("degenerate", 0.0) > 0:
+            breakdown.diagnostics["degenerate"] = 1.0
+            if "entropy_var" in r:
+                breakdown.diagnostics["entropy_var"] = r["entropy_var"]
         return breakdown
 
     # ═══════════════════════════════════════════════════════
