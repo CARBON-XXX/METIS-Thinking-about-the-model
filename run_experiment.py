@@ -469,7 +469,7 @@ class ExperimentConfig:
     temperature: float = 0.7
 
     # Training
-    dpo_epochs: int = 2
+    dpo_epochs: int = 3
     dpo_learning_rate: float = 1e-6     # Moderate: enough signal to cross KL barrier
     dpo_batch_size: int = 2              # Effective batch = 16 with accum=8
     dpo_beta: float = 0.1               # Lower beta = more freedom to deviate from ref model
