@@ -1355,9 +1355,9 @@ def main():
                         help="Number of training prompts")
     parser.add_argument("--n-samples", type=int, default=8,
                         help="Samples per prompt")
-    parser.add_argument("--max-tokens", type=int, default=200,
+    parser.add_argument("--max-tokens", type=int, default=512,
                         help="Max new tokens per generation")
-    parser.add_argument("--dpo-epochs", type=int, default=2,
+    parser.add_argument("--dpo-epochs", type=int, default=3,
                         help="DPO training epochs")
     parser.add_argument("--dpo-lr", type=float, default=1e-6,
                         help="DPO learning rate")
@@ -1382,6 +1382,7 @@ def main():
         dpo_epochs=args.dpo_epochs,
         dpo_learning_rate=args.dpo_lr,
         lora_r=args.lora_r,
+        eval_max_tokens=args.max_tokens,  # Sync eval max tokens
     )
 
     os.makedirs(config.output_dir, exist_ok=True)
