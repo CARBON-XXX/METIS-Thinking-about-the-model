@@ -525,21 +525,24 @@ class EvalMetrics:
 
 def phase1_generate(
     config: ExperimentConfig,
+    vllm_url: Optional[str] = None,
 ) -> Tuple[List[Dict], Any, Any]:
     """
     Generate K responses per prompt with METIS instrumentation.
     Returns scored data + model + tokenizer for reuse.
+
+    If vllm_url is set, uses two-phase generation:
+      Phase A: vLLM batch generation (fast, parallel)
+      Phase B: Teacher-forcing for METIS traces (accurate)
     """
     logger.info(f"{'='*60}")
-    logger.info(f"PHASE 1: Generate & Score ({config.n_train_prompts} prompts × {config.n_samples_per_prompt} samples)")
+    mode_str = "vLLM 2-phase" if vllm_url else "HuggingFace"
+    logger.info(f"PHASE 1: Generate & Score ({config.n_train_prompts} prompts × {config.n_samples_per_prompt} samples) [{mode_str}]")
     logger.info(f"{'='*60}")
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from metis.training.generator import MetisGenerator
     from metis.training.rewards import CognitiveRewardComputer
 
-    # Load model
-    logger.info(f"Loading model: {config.model_name}")
     device = config.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -550,15 +553,7 @@ def phase1_generate(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_kwargs: Dict[str, Any] = {"trust_remote_code": True}
-    if device == "cuda":
-        model_kwargs["torch_dtype"] = torch.float16
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model_name, **model_kwargs
-    ).to(device)
-    model.eval()
-
-    generator = MetisGenerator(model, tokenizer)
+    prompts = TRAIN_PROMPTS[:config.n_train_prompts]
     reward_computer = CognitiveRewardComputer()
 
     # ── Dashboard bridge (optional) ──
@@ -568,81 +563,205 @@ def phase1_generate(
         bridge = SignalBridge(port=8765)
         bridge.total_prompts = config.n_train_prompts
         bridge.phase = "generate"
-        generator.metis.add_listener(bridge.on_signal)
         bridge.start()
         logger.info("[Bridge] Dashboard bridge started on ws://0.0.0.0:8765")
     except Exception as e:
         logger.warning(f"[Bridge] Dashboard bridge unavailable: {e}")
         bridge = None
 
-    prompts = TRAIN_PROMPTS[:config.n_train_prompts]
-    all_data: List[Dict] = []
+    # ═══════════════════════════════════════════════════════
+    # vLLM Two-Phase Path
+    # ═══════════════════════════════════════════════════════
+    if vllm_url:
+        from metis.training.vllm_generator import VLLMBatchGenerator
 
-    for i, prompt in enumerate(prompts):
-        logger.info(f"[{i+1}/{len(prompts)}] {prompt[:50]}...")
-
-        # Update bridge progress metadata
-        if bridge is not None:
-            bridge.prompt_index = i + 1
-            bridge.current_prompt = prompt
-
-        # Format as chat if possible
-        chat_prompt = _format_chat(tokenizer, prompt)
-
-        samples = generator.generate_batch(
-            chat_prompt,
-            n_samples=config.n_samples_per_prompt,
-            max_new_tokens=config.max_new_tokens,
+        vllm_gen = VLLMBatchGenerator(
+            vllm_url=vllm_url,
+            model_name=config.model_name,
         )
 
-        for j, (text, trace) in enumerate(samples):
-            if bridge is not None:
-                bridge.sample_index = j + 1
-            # Non-zero assertion gate: mean_entropy==0 means METIS cognitive
-            # layer was bypassed — abort before dead data enters DPO pipeline
-            if trace.total_tokens > 5 and trace.mean_entropy == 0.0:
-                raise RuntimeError(
-                    f"FATAL: trace.mean_entropy == 0.0 for prompt {i+1} sample {j}. "
-                    f"METIS cognitive hook is bypassed — logits not reaching step(). "
-                    f"Check generator.py introspect() call chain."
-                )
+        if not vllm_gen.check_server():
+            raise RuntimeError(
+                f"vLLM server not reachable at {vllm_url}. "
+                f"Start it with: wsl -e bash vllm_serve.sh"
+            )
+        logger.info(f"[vLLM] Server connected: {vllm_url}")
 
-            reward = reward_computer.compute(trace)
+        # Phase A: Batch generate all samples via vLLM
+        logger.info(f"[vLLM] Phase A: Generating {config.n_train_prompts * config.n_samples_per_prompt} samples...")
+        t0 = time.time()
+        all_raw = vllm_gen.generate_all_prompts(
+            prompts,
+            n_samples=config.n_samples_per_prompt,
+            max_tokens=config.max_new_tokens,
+            bridge=bridge,
+        )
+        gen_time = time.time() - t0
+        logger.info(f"[vLLM] Phase A complete: {gen_time:.0f}s ({gen_time/60:.1f}m)")
+
+        # Phase B: Load HF model for teacher-forcing METIS traces
+        logger.info("[vLLM] Phase B: Loading HF model for teacher-forcing...")
+        model_kwargs: Dict[str, Any] = {"trust_remote_code": True}
+        if device == "cuda":
+            model_kwargs["torch_dtype"] = torch.float16
+        model = AutoModelForCausalLM.from_pretrained(
+            config.model_name, **model_kwargs
+        ).to(device)
+        model.eval()
+
+        # Register bridge to METIS if available
+        if bridge is not None and vllm_gen.metis is not None:
+            vllm_gen.metis.add_listener(bridge.on_signal)
+
+        all_data: List[Dict] = []
+        t1 = time.time()
+
+        for i, prompt in enumerate(prompts):
+            logger.info(f"[TF] [{i+1}/{len(prompts)}] {prompt[:50]}...")
             if bridge is not None:
-                bridge.push_reward(reward.to_dict(), j, text)
-            entry = {
-                "prompt": prompt,
-                "chat_prompt": chat_prompt,
-                "response": text,
-                "sample_idx": j,
-                "reward_total": reward.total,
-                "reward_breakdown": reward.to_dict(),
-                "trace_stats": {
-                    "total_tokens": trace.total_tokens,
-                    "mean_entropy": trace.mean_entropy,
-                    "mean_surprise": trace.mean_surprise,
-                    "fast_ratio": trace.fast_count / max(trace.total_tokens, 1),
-                    "deep_ratio": trace.deep_count / max(trace.total_tokens, 1),
-                },
-            }
-            all_data.append(entry)
-            logger.info(
-                f"  sample {j}: reward={reward.total:+.4f} "
-                f"tokens={trace.total_tokens} "
-                f"H={trace.mean_entropy:.3f} S={trace.mean_surprise:.3f} "
-                f"resp={text[:50]}..."
+                bridge.prompt_index = i + 1
+                bridge.current_prompt = prompt
+                bridge.phase = "teacher-force"
+
+            raw_samples = all_raw.get(i, [])
+            results = vllm_gen.teacher_force_traces(
+                prompt, raw_samples, model, tokenizer,
             )
 
-        # Force VRAM garbage collection after each prompt
-        # Prevents PCIe Unified Memory fallback on 8GB GPUs
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            for j, (text, trace) in enumerate(results):
+                if bridge is not None:
+                    bridge.sample_index = j + 1
 
-    # Stop bridge
+                if not text or trace.total_tokens == 0:
+                    continue
+
+                if trace.total_tokens > 5 and trace.mean_entropy == 0.0:
+                    logger.warning(
+                        f"[TF] Skipping prompt {i+1} sample {j}: mean_entropy==0"
+                    )
+                    continue
+
+                reward = reward_computer.compute(trace)
+                if bridge is not None:
+                    bridge.push_reward(reward.to_dict(), j, text)
+                entry = {
+                    "prompt": prompt,
+                    "chat_prompt": _format_chat(tokenizer, prompt),
+                    "response": text,
+                    "sample_idx": j,
+                    "reward_total": reward.total,
+                    "reward_breakdown": reward.to_dict(),
+                    "trace_stats": {
+                        "total_tokens": trace.total_tokens,
+                        "mean_entropy": trace.mean_entropy,
+                        "mean_surprise": trace.mean_surprise,
+                        "fast_ratio": trace.fast_count / max(trace.total_tokens, 1),
+                        "deep_ratio": trace.deep_count / max(trace.total_tokens, 1),
+                    },
+                }
+                all_data.append(entry)
+                logger.info(
+                    f"  sample {j}: reward={reward.total:+.4f} "
+                    f"tokens={trace.total_tokens} "
+                    f"H={trace.mean_entropy:.3f} S={trace.mean_surprise:.3f}"
+                )
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        tf_time = time.time() - t1
+        logger.info(
+            f"[vLLM] Phase B complete: {tf_time:.0f}s ({tf_time/60:.1f}m). "
+            f"Total: {gen_time + tf_time:.0f}s"
+        )
+
+    # ═══════════════════════════════════════════════════════
+    # Standard HuggingFace Path (original)
+    # ═══════════════════════════════════════════════════════
+    else:
+        from metis.training.generator import MetisGenerator
+
+        logger.info(f"Loading model: {config.model_name}")
+        model_kwargs: Dict[str, Any] = {"trust_remote_code": True}
+        if device == "cuda":
+            model_kwargs["torch_dtype"] = torch.float16
+        model = AutoModelForCausalLM.from_pretrained(
+            config.model_name, **model_kwargs
+        ).to(device)
+        model.eval()
+
+        generator = MetisGenerator(model, tokenizer)
+
+        if bridge is not None:
+            generator.metis.add_listener(bridge.on_signal)
+
+        all_data: List[Dict] = []
+
+        for i, prompt in enumerate(prompts):
+            logger.info(f"[{i+1}/{len(prompts)}] {prompt[:50]}...")
+
+            if bridge is not None:
+                bridge.prompt_index = i + 1
+                bridge.current_prompt = prompt
+
+            chat_prompt = _format_chat(tokenizer, prompt)
+
+            samples = generator.generate_batch(
+                chat_prompt,
+                n_samples=config.n_samples_per_prompt,
+                max_new_tokens=config.max_new_tokens,
+            )
+
+            for j, (text, trace) in enumerate(samples):
+                if bridge is not None:
+                    bridge.sample_index = j + 1
+                if trace.total_tokens > 5 and trace.mean_entropy == 0.0:
+                    raise RuntimeError(
+                        f"FATAL: trace.mean_entropy == 0.0 for prompt {i+1} sample {j}. "
+                        f"METIS cognitive hook is bypassed — logits not reaching step(). "
+                        f"Check generator.py introspect() call chain."
+                    )
+
+                reward = reward_computer.compute(trace)
+                if bridge is not None:
+                    bridge.push_reward(reward.to_dict(), j, text)
+                entry = {
+                    "prompt": prompt,
+                    "chat_prompt": chat_prompt,
+                    "response": text,
+                    "sample_idx": j,
+                    "reward_total": reward.total,
+                    "reward_breakdown": reward.to_dict(),
+                    "trace_stats": {
+                        "total_tokens": trace.total_tokens,
+                        "mean_entropy": trace.mean_entropy,
+                        "mean_surprise": trace.mean_surprise,
+                        "fast_ratio": trace.fast_count / max(trace.total_tokens, 1),
+                        "deep_ratio": trace.deep_count / max(trace.total_tokens, 1),
+                    },
+                }
+                all_data.append(entry)
+                logger.info(
+                    f"  sample {j}: reward={reward.total:+.4f} "
+                    f"tokens={trace.total_tokens} "
+                    f"H={trace.mean_entropy:.3f} S={trace.mean_surprise:.3f} "
+                    f"resp={text[:50]}..."
+                )
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        if bridge is not None:
+            try:
+                generator.metis.remove_listener(bridge.on_signal)
+            except Exception:
+                pass
+
+    # ── Cleanup bridge ──
     if bridge is not None:
         try:
-            generator.metis.remove_listener(bridge.on_signal)
             bridge.stop()
         except Exception:
             pass
@@ -1397,6 +1516,9 @@ def main():
                         help="Path to METIS DPO checkpoint (for eval-only)")
     parser.add_argument("--random-checkpoint", type=str, default=None,
                         help="Path to Random DPO checkpoint (for eval-only)")
+    parser.add_argument("--vllm", type=str, default=None,
+                        help="vLLM server URL (e.g. http://localhost:8000/v1). "
+                             "Enables 2-phase generation: vLLM batch gen + teacher-forcing.")
     args = parser.parse_args()
 
     config = ExperimentConfig(
@@ -1411,6 +1533,7 @@ def main():
         lora_r=args.lora_r,
         eval_max_tokens=args.max_tokens,  # Sync eval max tokens
     )
+    vllm_url = args.vllm  # None = use HF generator (default)
 
     os.makedirs(config.output_dir, exist_ok=True)
 
@@ -1442,7 +1565,7 @@ def main():
     start = time.time()
 
     if args.phase in ("all", "generate"):
-        scored_data, model, tokenizer = phase1_generate(config)
+        scored_data, model, tokenizer = phase1_generate(config, vllm_url=vllm_url)
 
         if args.phase == "generate":
             logger.info("Phase 1 complete. Use --phase train to continue.")
