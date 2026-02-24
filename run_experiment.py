@@ -564,11 +564,30 @@ def phase1_generate(
     generator = MetisGenerator(model, tokenizer)
     reward_computer = CognitiveRewardComputer()
 
+    # ── Dashboard bridge (optional) ──
+    bridge = None
+    try:
+        from metis.bridge import SignalBridge
+        bridge = SignalBridge(port=8765)
+        bridge.total_prompts = config.n_train_prompts
+        bridge.phase = "generate"
+        generator.metis.add_listener(bridge.on_signal)
+        bridge.start()
+        logger.info("[Bridge] Dashboard bridge started on ws://0.0.0.0:8765")
+    except Exception as e:
+        logger.warning(f"[Bridge] Dashboard bridge unavailable: {e}")
+        bridge = None
+
     prompts = TRAIN_PROMPTS[:config.n_train_prompts]
     all_data: List[Dict] = []
 
     for i, prompt in enumerate(prompts):
         logger.info(f"[{i+1}/{len(prompts)}] {prompt[:50]}...")
+
+        # Update bridge progress metadata
+        if bridge is not None:
+            bridge.prompt_index = i + 1
+            bridge.current_prompt = prompt
 
         # Format as chat if possible
         chat_prompt = _format_chat(tokenizer, prompt)
@@ -580,6 +599,8 @@ def phase1_generate(
         )
 
         for j, (text, trace) in enumerate(samples):
+            if bridge is not None:
+                bridge.sample_index = j + 1
             # Non-zero assertion gate: mean_entropy==0 means METIS cognitive
             # layer was bypassed — abort before dead data enters DPO pipeline
             if trace.total_tokens > 5 and trace.mean_entropy == 0.0:
@@ -618,6 +639,14 @@ def phase1_generate(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    # Stop bridge
+    if bridge is not None:
+        try:
+            generator.metis.remove_listener(bridge.on_signal)
+            bridge.stop()
+        except Exception:
+            pass
 
     # Save raw data
     os.makedirs(config.output_dir, exist_ok=True)

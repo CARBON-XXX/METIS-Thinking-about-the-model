@@ -41,6 +41,11 @@ class MetisGenerator:
         self._device = device or str(next(model.parameters()).device)
         self._metis = Metis.attach(model, tokenizer, config=metis_config)
 
+    @property
+    def metis(self) -> Metis:
+        """Expose METIS instance for listener registration (dashboard bridge, etc.)."""
+        return self._metis
+
     @torch.inference_mode()
     def generate(
         self,

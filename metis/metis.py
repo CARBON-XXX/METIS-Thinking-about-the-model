@@ -99,6 +99,9 @@ class Metis:
         # Last signal
         self._last_signal: Optional[CognitiveSignal] = None
         
+        # Signal listeners (for dashboard bridge, logging, etc.)
+        self._listeners: list = []
+        
         # Session-level cognitive trace
         self._trace: Optional[CognitiveTrace] = None
         self._step_index = 0
@@ -220,6 +223,14 @@ class Metis:
             self._step_index += 1
         
         self._last_signal = signal
+        
+        # Notify listeners (dashboard bridge, etc.)
+        for listener in self._listeners:
+            try:
+                listener(signal, self)
+            except Exception:
+                pass
+        
         return signal
     
     def start_session(self, query: str, context: str = "") -> None:
@@ -295,6 +306,17 @@ class Metis:
         """Generation-level semantic entropy estimator (Kuhn et al.)"""
         return self._se_estimator
     
+    def add_listener(self, callback) -> None:
+        """Register a signal listener callback(signal, metis)."""
+        self._listeners.append(callback)
+
+    def remove_listener(self, callback) -> None:
+        """Remove a signal listener."""
+        try:
+            self._listeners.remove(callback)
+        except ValueError:
+            pass
+
     def feed_surprise(self, surprise: float) -> None:
         """Feed token surprise back to boundary guard and update trace (1-step lag feedback)."""
         self._boundary.feed_surprise(surprise)

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMockSignals } from "@/hooks/useMockSignals";
+import { useSignalStream } from "@/hooks/useSignalStream";
 import ECGCanvas from "@/components/ECGCanvas";
 import StatsPanel from "@/components/StatsPanel";
 import { PHASE_COLORS, DECISION_COLORS } from "@/lib/types";
@@ -70,17 +70,51 @@ function Header({
 }
 
 export default function DashboardPage() {
-  const { signals, latest, controllerStats, cotStats, tokenCount } = useMockSignals(60);
+  const {
+    signals,
+    controllerStats,
+    cotStats,
+    connected,
+    tokenCount,
+    promptIndex,
+    sampleIndex,
+    totalPrompts,
+    currentPrompt,
+    trainingPhase,
+  } = useSignalStream("ws://localhost:8765");
 
+  const latest = signals.length > 0 ? signals[signals.length - 1] : null;
   const phase = latest?.cognitive_phase ?? "recall";
   const fastT = controllerStats?.fast_threshold ?? 1.5;
   const deepT = controllerStats?.deep_threshold ?? 2.0;
+  const progress = totalPrompts > 0 ? (promptIndex / totalPrompts) * 100 : 0;
 
   return (
     <div className="min-h-screen flex flex-col bg-ecg-bg">
-      <Header phase={phase} tokenCount={tokenCount} connected={true} />
+      <Header phase={phase} tokenCount={tokenCount} connected={connected} />
 
       <main className="flex-1 p-4 space-y-3 max-w-7xl mx-auto w-full">
+        {/* Training Progress */}
+        <section className="bg-ecg-panel border border-ecg-panelBorder rounded-lg p-3">
+          <div className="flex items-center justify-between mb-1.5">
+            <h2 className="text-xs font-semibold text-ecg-muted uppercase tracking-wider">
+              Training — {trainingPhase.toUpperCase()}
+            </h2>
+            <span className="text-xs text-ecg-muted">
+              Prompt {promptIndex}/{totalPrompts} · Sample {sampleIndex}
+            </span>
+          </div>
+          <div className="w-full h-1.5 bg-ecg-bg rounded-full overflow-hidden mb-1.5">
+            <div
+              className="h-full rounded-full bg-ecg-green transition-all duration-300"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+          <p className="text-xs text-ecg-muted truncate opacity-70">
+            {currentPrompt || (connected ? "Waiting for signal..." : "Not connected — start training with bridge")}
+          </p>
+        </section>
+
         {/* ECG Waveform */}
         <section>
           <div className="flex items-center justify-between mb-1.5">

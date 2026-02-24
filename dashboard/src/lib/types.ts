@@ -12,6 +12,9 @@ export interface CognitiveSignal {
   entropy_trend: "stable" | "rising" | "falling" | "oscillating";
   cognitive_phase: "fluent" | "recall" | "reasoning" | "exploration" | "confusion";
   entropy_momentum: number;
+  boundary_action?: "GENERATE" | "HEDGE" | "SEEK" | "REFUSE";
+  token_surprise?: number;
+  cusum_alarm?: boolean;
 }
 
 /** Controller stats from AdaptiveController.stats property */
