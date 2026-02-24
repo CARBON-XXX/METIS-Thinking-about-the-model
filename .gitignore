@@ -65,6 +65,12 @@ scripts/
 # Runtime artifacts
 *_knowledge_gaps.json
 traces/
+experiment_output/
+experiment_full/
+checkpoints/
+
+# Rust build artifacts
+metis/_native/target/
 
 # External plugins
 skills/
