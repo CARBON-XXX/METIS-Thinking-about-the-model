@@ -277,6 +277,15 @@ class MetisInference:
         thinking_close_pending = False
         thinking_close_since = -1
 
+        # L6: Backtracking — roll back System 1 draft after System 2 thinking
+        # When thinking closes, delete the erroneous draft tokens that preceded
+        # the thinking block, and regenerate from the last clean sentence boundary.
+        # This prevents "Thought-Speech Asynchrony": System 1 says something wrong,
+        # System 2 realizes it, but the wrong tokens are already committed.
+        last_sentence_end_idx = 0   # index in generated_tokens at last sentence end
+        draft_rollback_idx = -1     # rollback target; -1 = no rollback
+        think_block_start_idx = -1  # where <thinking> was injected in generated_tokens
+
         # Repetition detection state
         repetition_events = 0
         thinking_failed = False    # Set True when thinking was closed due to repetition
@@ -360,6 +369,7 @@ class MetisInference:
                         )
                         generated_tokens = generated_tokens[:-rep_len]
                         vis_buffer.clear()
+                        last_sentence_end_idx = min(last_sentence_end_idx, len(generated_tokens))
 
                         if generated_tokens:
                             gen_ids = torch.tensor([generated_tokens], device=model.device)
@@ -375,6 +385,10 @@ class MetisInference:
                             )
                         past_key_values = clean_out.past_key_values
                         logits = clean_out.logits[:, -1, :]
+
+                    # L6: Save rollback checkpoint before injecting <thinking>
+                    draft_rollback_idx = last_sentence_end_idx
+                    think_block_start_idx = len(generated_tokens)
 
                     # Open <thinking> tag + Critique Loop scaffold
                     # Extract draft text so model can "look back" at its own output
@@ -512,6 +526,7 @@ class MetisInference:
                         )
                         # Trim the repeated tail
                         generated_tokens = generated_tokens[:-rep_len]
+                        last_sentence_end_idx = min(last_sentence_end_idx, len(generated_tokens))
                         # Close thinking block before break so _split_thinking
                         # can separate thinking content from the answer.
                         if is_thinking:
@@ -540,6 +555,7 @@ class MetisInference:
                             "force stopping (thinking already failed)"
                         )
                         generated_tokens = generated_tokens[:-rep_len]
+                        last_sentence_end_idx = min(last_sentence_end_idx, len(generated_tokens))
                         break
 
                     elif not is_thinking and use_thinking_protocol:
@@ -552,6 +568,7 @@ class MetisInference:
                         # Trim repeated tail first
                         generated_tokens = generated_tokens[:-rep_len]
                         vis_buffer.clear()
+                        last_sentence_end_idx = min(last_sentence_end_idx, len(generated_tokens))
 
                         # Regenerate KV cache to remove dirty context
                         if generated_tokens:
@@ -568,6 +585,10 @@ class MetisInference:
                             )
                         past_key_values = clean_out.past_key_values
                         logits = clean_out.logits[:, -1, :]
+
+                        # L6: Save rollback checkpoint
+                        draft_rollback_idx = last_sentence_end_idx
+                        think_block_start_idx = len(generated_tokens)
 
                         # Inject <thinking> tag + Critique Loop scaffold (model is stuck)
                         _draft = tokenizer.decode(
@@ -617,6 +638,7 @@ class MetisInference:
                         )
                         generated_tokens = generated_tokens[:-rep_len]
                         vis_buffer.clear()
+                        last_sentence_end_idx = min(last_sentence_end_idx, len(generated_tokens))
 
                         if generated_tokens:
                             gen_ids = torch.tensor(
@@ -647,6 +669,7 @@ class MetisInference:
                         )
                         generated_tokens = generated_tokens[:-rep_len]
                         vis_buffer.clear()
+                        last_sentence_end_idx = min(last_sentence_end_idx, len(generated_tokens))
 
                         # Rebuild KV cache without repeated tail
                         if generated_tokens:
@@ -811,6 +834,7 @@ class MetisInference:
                     logits = close_out.logits[:, -1, :]
 
                     is_thinking = False
+                    thinking_close_pending = False
                     # Flush buffered thinking tokens
                     if vis_buffer:
                         for t, s in vis_buffer:
@@ -818,7 +842,37 @@ class MetisInference:
                                 self._on_token(t, s)
                         vis_buffer.clear()
 
-                    # Re-sample from post-closing logits for the answer
+                    # L6: Backtracking — roll back erroneous System 1 draft
+                    if draft_rollback_idx >= 0 and draft_rollback_idx < think_block_start_idx:
+                        think_block_end_idx = len(generated_tokens)
+                        think_tokens = list(generated_tokens[think_block_start_idx:think_block_end_idx])
+                        draft_len = think_block_start_idx - draft_rollback_idx
+                        generated_tokens[:] = list(generated_tokens[:draft_rollback_idx]) + think_tokens
+                        last_sentence_end_idx = min(last_sentence_end_idx, draft_rollback_idx)
+                        logger.info(
+                            f"[METIS] L6 Backtrack: deleted {draft_len} draft tokens, "
+                            f"kept {len(think_tokens)} thinking tokens"
+                        )
+                        draft_rollback_idx = -1
+                        think_block_start_idx = -1
+
+                        # Rebuild KV cache without draft tokens
+                        if generated_tokens:
+                            gen_ids = torch.tensor([generated_tokens], device=model.device)
+                            full_input = torch.cat([prompt_ids, gen_ids], dim=1)
+                        else:
+                            full_input = prompt_ids
+                        with torch.no_grad():
+                            rebuild_out = model(
+                                input_ids=full_input, use_cache=True, return_dict=True,
+                            )
+                        past_key_values = rebuild_out.past_key_values
+                        logits = rebuild_out.logits[:, -1, :]
+                    else:
+                        draft_rollback_idx = -1
+                        think_block_start_idx = -1
+
+                    # Re-sample from (possibly rebuilt) logits for the answer
                     next_token_id = self._cognitive_sample(
                         logits, signal, temperature, top_p, generated_tokens
                     )
@@ -906,6 +960,7 @@ class MetisInference:
                     else:
                         # Thinking block closed naturally
                         is_thinking = False
+                        thinking_close_pending = False
                         if vis_buffer:
                             for t, s in vis_buffer:
                                 if self._on_token:
@@ -916,7 +971,73 @@ class MetisInference:
                             f"at {tokens_in_block} tokens"
                         )
 
+                        # Append the closing token (completes </thinking>)
+                        generated_tokens.append(next_token_id)
+
+                        # L6: Backtracking — roll back erroneous System 1 draft
+                        if draft_rollback_idx >= 0 and draft_rollback_idx < think_block_start_idx:
+                            think_block_end_idx = len(generated_tokens)
+                            think_tokens = list(generated_tokens[think_block_start_idx:think_block_end_idx])
+                            draft_len = think_block_start_idx - draft_rollback_idx
+                            generated_tokens[:] = list(generated_tokens[:draft_rollback_idx]) + think_tokens
+                            last_sentence_end_idx = min(last_sentence_end_idx, draft_rollback_idx)
+                            logger.info(
+                                f"[METIS] L6 Backtrack (natural): deleted {draft_len} draft tokens, "
+                                f"kept {len(think_tokens)} thinking tokens"
+                            )
+                            draft_rollback_idx = -1
+                            think_block_start_idx = -1
+
+                            # Rebuild KV cache without draft tokens
+                            if generated_tokens:
+                                gen_ids = torch.tensor([generated_tokens], device=model.device)
+                                full_input = torch.cat([prompt_ids, gen_ids], dim=1)
+                            else:
+                                full_input = prompt_ids
+                            with torch.no_grad():
+                                rebuild_out = model(
+                                    input_ids=full_input, use_cache=True, return_dict=True,
+                                )
+                            past_key_values = rebuild_out.past_key_values
+                            logits = rebuild_out.logits[:, -1, :]
+                        else:
+                            draft_rollback_idx = -1
+                            think_block_start_idx = -1
+                            # Feed closing token to get fresh logits
+                            _close_input = torch.tensor([[next_token_id]], device=model.device)
+                            _close_out = model(
+                                input_ids=_close_input,
+                                past_key_values=past_key_values,
+                                use_cache=True,
+                                return_dict=True,
+                            )
+                            past_key_values = _close_out.past_key_values
+                            logits = _close_out.logits[:, -1, :]
+
+                        # Re-sample fresh answer token
+                        next_token_id = self._cognitive_sample(
+                            logits, signal, temperature, top_p, generated_tokens
+                        )
+                        generated_tokens.append(next_token_id)
+                        if self._on_token is not None and next_token_id != tokenizer.eos_token_id:
+                            token_text = tokenizer.decode(
+                                [next_token_id], skip_special_tokens=True
+                            )
+                            self._on_token(token_text, signal)
+                        if next_token_id == tokenizer.eos_token_id:
+                            break
+                        input_ids = torch.tensor(
+                            [[next_token_id]], device=model.device
+                        )
+                        continue
+
             generated_tokens.append(next_token_id)
+
+            # L6: Track sentence boundaries for backtracking
+            if not is_thinking:
+                _boundary_text = tokenizer.decode([next_token_id], skip_special_tokens=True)
+                if any(c in _boundary_text for c in _SENTENCE_BREAKS):
+                    last_sentence_end_idx = len(generated_tokens)
 
             # ─── Streaming callback (Buffered) ───
             if self._on_token is not None and next_token_id != tokenizer.eos_token_id:
