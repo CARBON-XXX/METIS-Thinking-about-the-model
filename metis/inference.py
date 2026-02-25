@@ -58,17 +58,32 @@ logger = logging.getLogger(__name__)
 #   3. Short (< 30 tokens) → doesn't waste thinking budget
 #   4. Ends mid-sentence → model must CONTINUE the reasoning, not start fresh
 
+def _has_cjk(text: str) -> bool:
+    """Detect if text contains CJK characters (Chinese/Japanese/Korean)."""
+    for ch in text:
+        cp = ord(ch)
+        if (0x4E00 <= cp <= 0x9FFF      # CJK Unified Ideographs
+            or 0x3400 <= cp <= 0x4DBF    # CJK Extension A
+            or 0x3000 <= cp <= 0x303F    # CJK Punctuation
+            or 0x3040 <= cp <= 0x30FF):  # Hiragana + Katakana
+            return True
+    return False
+
+
 def _build_reasoning_scaffold(
     strategy: CoTStrategy,
     user_input: str,
     context: str = "",
 ) -> str:
     """
-    Build a structured reasoning scaffold for CoT injection.
+    Build a language-adaptive reasoning scaffold for CoT injection.
 
-    Instead of bare <thinking>, this provides a cognitive template that
-    forces the model to analyze before generating. The scaffold ends
-    mid-sentence so the model must continue the reasoning chain.
+    Key design (v2 — "按头小分队"):
+      1. Same language as user input (Chinese scaffold for CJK, English otherwise)
+      2. Echo FULL input in quotes (critical for catching trailing typos)
+      3. End with a strong auto-regressive hook ("我注意到" / "I notice")
+         that FORCES the model to identify something before knowledge dumping
+      4. Ultra-short (< 15 tokens) — don't waste thinking budget
 
     Args:
         strategy: CoT strategy (determines scaffold type)
@@ -78,38 +93,35 @@ def _build_reasoning_scaffold(
     Returns:
         Scaffold string to inject after <thinking> tag
     """
-    # Truncate input for scaffold (don't waste thinking tokens on long prompts)
-    preview = user_input[:80].strip()
-    if len(user_input) > 80:
+    # Echo full input up to 120 chars (longer than before — must catch trailing chars)
+    preview = user_input[:120].strip()
+    if len(user_input) > 120:
         preview += "..."
 
-    if strategy == CoTStrategy.CLARIFICATION:
-        # Ambiguity/typo detection scaffold (strongest typo focus)
-        return (
-            f'The user wrote: "{preview}"\n'
-            f'Analysis of input quality and potential issues: '
-        )
-    elif strategy == CoTStrategy.DECOMPOSITION:
-        # Logical decomposition scaffold
-        return (
-            f'The question is: "{preview}"\n'
-            f'This requires step-by-step analysis.\n'
-            f'Step 1: identify what exactly is being asked. '
-        )
-    elif strategy == CoTStrategy.REFLECTION:
-        # Self-correction scaffold
-        return (
-            f'Wait, let me re-read the question: "{preview}"\n'
-            f'What I said so far might be wrong because '
-        )
+    use_chinese = _has_cjk(user_input)
+
+    if use_chinese:
+        # ── Chinese scaffolds ──
+        # "我注意到" = "I notice that" — model MUST say what it noticed
+        if strategy == CoTStrategy.CLARIFICATION:
+            return f'仔细审题："{preview}"\n这句话有个问题：'
+        elif strategy == CoTStrategy.DECOMPOSITION:
+            return f'审题："{preview}"\n这个问题需要分步骤，首先'
+        elif strategy == CoTStrategy.REFLECTION:
+            return f'等等，重新看："{preview}"\n之前的回答可能有误，因为'
+        else:
+            # STANDARD — strongest general-purpose hook
+            return f'仔细审题："{preview}"\n我注意到'
     else:
-        # STANDARD: intent + typo analysis scaffold
-        # Always check for typos/ambiguity — this catches cases like
-        # "蜂鸟是什么可" where the real question is hidden behind a typo.
-        return (
-            f'The user asked: "{preview}"\n'
-            f'Analysis of user intent and potential errors: '
-        )
+        # ── English scaffolds ──
+        if strategy == CoTStrategy.CLARIFICATION:
+            return f'Input: "{preview}"\nI notice a potential issue: '
+        elif strategy == CoTStrategy.DECOMPOSITION:
+            return f'Input: "{preview}"\nBreaking this down, first '
+        elif strategy == CoTStrategy.REFLECTION:
+            return f'Wait, re-reading: "{preview}"\nMy previous response may be wrong because '
+        else:
+            return f'Input: "{preview}"\nI notice '
 
 
 class MetisInference:
@@ -143,7 +155,7 @@ class MetisInference:
         # Self-correction budget control
         max_correction_tokens: int = 96,
         # Maximum thinking tokens before forced closure
-        max_thinking_tokens: int = 512,
+        max_thinking_tokens: int = 128,
         # Callbacks
         on_seek: Optional[Callable[[str, str], Optional[str]]] = None,
         on_token: Optional[Callable[[str, 'CognitiveSignal'], None]] = None,
@@ -264,6 +276,17 @@ class MetisInference:
         is_thinking = use_thinking_protocol
         thinking_start_step = 0 if is_thinking else -1
         min_thinking_tokens = 64  # Minimum thinking length (Anti-Lazy)
+        dynamic_thinking_budget = self._max_thinking_tokens  # L2: overridden at injection time
+
+        # L1: Recitation Detector — track entropy/decisions inside thinking block
+        # Real reasoning = exploratory (mid-high entropy, NORMAL/DEEP mode)
+        # Recitation  = highly predictable (low entropy, FAST mode)
+        thinking_entropies: List[float] = []
+        thinking_decisions: List[Decision] = []
+        _RECITATION_WINDOW = 8       # Sliding window size
+        _RECITATION_ENTROPY_CEIL = 0.3  # bits — below this = reciting, not reasoning
+        _RECITATION_FAST_RATIO = 0.75   # FAST ratio above this = not thinking
+        _RECITATION_MIN_TOKENS = 16     # Don't check until scaffold has had effect
 
         # Repetition detection state
         repetition_events = 0
@@ -397,9 +420,24 @@ class MetisInference:
                     cot_inject_token_idx = len(generated_tokens) - len(think_open_ids)
                     cot_strategies_used.append(strategy)
 
+                    # L2: Dynamic thinking budget based on CUSUM magnitude
+                    # Higher CUSUM at trigger = deeper confusion = more thinking time
+                    # Note: CUSUM was just reset by record_injection(), use pre-reset stats
+                    _THINK_BUDGET_MIN = 24   # 1-2 sentences of analysis
+                    _THINK_BUDGET_MAX = 128  # No encyclopedias allowed
+                    _cusum_at_trigger = signal.z_score  # Use z-score as proxy (CUSUM already reset)
+                    _cusum_ratio = min(max(_cusum_at_trigger / 2.0, 0.0), 2.0)
+                    dynamic_thinking_budget = int(
+                        _THINK_BUDGET_MIN + (_THINK_BUDGET_MAX - _THINK_BUDGET_MIN) * _cusum_ratio
+                    )
+                    # Reset thinking trackers for this new block
+                    thinking_entropies.clear()
+                    thinking_decisions.clear()
+
                     logger.info(
                         f"[METIS] Thinking injected at step {step}: "
-                        f"reason={strategy.value}, z={signal.z_score:.2f}"
+                        f"reason={strategy.value}, z={signal.z_score:.2f}, "
+                        f"budget={dynamic_thinking_budget} tokens"
                     )
 
             # --- Boundary guard action execution ---
@@ -574,6 +612,10 @@ class MetisInference:
                         thinking_start_step = step
                         cot_injected = True
                         cot_inject_token_idx = len(generated_tokens) - len(think_open_ids)
+                        # L2: Repetition-triggered thinking gets modest budget
+                        dynamic_thinking_budget = 64
+                        thinking_entropies.clear()
+                        thinking_decisions.clear()
 
                     elif not is_thinking:
                         # think=OFF: trim repeated tail + rebuild KV cache
@@ -679,19 +721,51 @@ class MetisInference:
             # Feed surprise back to boundary guard (1-step lag: affects NEXT step's CUSUM)
             self._metis.feed_surprise(signal.token_surprise)
             
-            # --- Max Thinking Tokens: force-close thinking block ---
-            # Models not trained for <thinking> protocol (e.g. Qwen 2.5)
-            # will never generate </thinking> on their own, causing the
-            # thinking phase to consume ALL token budget with no answer.
-            # Force-close when limit is reached and let model output the answer.
+            # --- L1: Recitation Detector + L2: Dynamic Budget ---
+            # Two-layer defense against performative reasoning:
+            #   L1: If model is reciting (low entropy + FAST mode) → force-close
+            #   L2: Dynamic budget based on CUSUM magnitude at injection time
             if is_thinking:
                 tokens_in_block = step - thinking_start_step
-                if tokens_in_block >= self._max_thinking_tokens:
+
+                # Track entropy/decisions inside thinking block
+                thinking_entropies.append(signal.semantic_entropy)
+                thinking_decisions.append(signal.decision)
+
+                # L1: Recitation Detector — sliding window check
+                # Skip first _RECITATION_MIN_TOKENS to let scaffold take effect
+                should_truncate_recitation = False
+                if (
+                    tokens_in_block >= _RECITATION_MIN_TOKENS
+                    and len(thinking_entropies) >= _RECITATION_WINDOW
+                ):
+                    window_h = thinking_entropies[-_RECITATION_WINDOW:]
+                    window_d = thinking_decisions[-_RECITATION_WINDOW:]
+                    avg_h = sum(window_h) / len(window_h)
+                    fast_ratio = sum(
+                        1 for d in window_d if d == Decision.FAST
+                    ) / len(window_d)
+
+                    if avg_h < _RECITATION_ENTROPY_CEIL and fast_ratio >= _RECITATION_FAST_RATIO:
+                        should_truncate_recitation = True
+                        logger.info(
+                            f"[METIS] Recitation detected at step {step}: "
+                            f"avg_H={avg_h:.3f} < {_RECITATION_ENTROPY_CEIL}, "
+                            f"FAST={fast_ratio:.0%} >= {_RECITATION_FAST_RATIO:.0%} "
+                            f"→ force-closing thinking (you're reciting, not reasoning)"
+                        )
+
+                # L2: Dynamic budget exhaustion
+                should_truncate_budget = tokens_in_block >= dynamic_thinking_budget
+
+                if should_truncate_budget and not should_truncate_recitation:
                     logger.info(
                         f"[METIS] Thinking budget exhausted "
-                        f"({tokens_in_block}/{self._max_thinking_tokens}), "
+                        f"({tokens_in_block}/{dynamic_thinking_budget}), "
                         f"force-closing thinking block"
                     )
+
+                if should_truncate_recitation or should_truncate_budget:
                     # Inject </thinking>\n to close the block
                     close_tag = "\n</thinking>\n"
                     close_tag_ids = tokenizer.encode(
@@ -702,9 +776,10 @@ class MetisInference:
 
                     # Notify streaming callback
                     if self._on_token is not None:
+                        _reason = "recitation" if should_truncate_recitation else "budget"
                         close_signal = CognitiveSignal(
                             decision=Decision.DEEP,
-                            introspection="[Thinking End: budget]",
+                            introspection=f"[Thinking End: {_reason}]",
                         )
                         self._on_token(close_tag, close_signal)
 
