@@ -775,11 +775,30 @@ class MetisInference:
                 thinking_entropies.append(signal.semantic_entropy)
                 thinking_decisions.append(signal.decision)
 
+                # Detect math reasoning content in recent tokens (shared by L1/L1.5)
+                # Math derivation has naturally low entropy — don't kill it
+                _MATH_CHECK_WINDOW = 16
+                _is_math_reasoning = False
+                if len(generated_tokens) >= _MATH_CHECK_WINDOW:
+                    _recent_for_math = tokenizer.decode(
+                        generated_tokens[-_MATH_CHECK_WINDOW:],
+                        skip_special_tokens=True,
+                    )
+                    _MATH_SIGNALS = (
+                        '=', '+', '-', '×', '÷', '/', '*',
+                        '\\frac', '\\times', '\\div', '\\sum',
+                        '概率', '分母', '分子', 'probability',
+                    )
+                    _math_hits = sum(1 for p in _MATH_SIGNALS if p in _recent_for_math)
+                    _has_digits = any(c.isdigit() for c in _recent_for_math)
+                    _is_math_reasoning = _has_digits and _math_hits >= 2
+
                 # L1.5: Markup Detector — catch MathML/XML/HTML generation
                 # in thinking blocks. XML is formatting, not reasoning.
+                # EXEMPT: genuine math content (digits + operators) is NOT markup
                 _MARKUP_CHECK_WINDOW = 16
                 should_truncate_markup = False
-                if tokens_in_block >= 8 and len(generated_tokens) >= _MARKUP_CHECK_WINDOW:
+                if tokens_in_block >= 8 and len(generated_tokens) >= _MARKUP_CHECK_WINDOW and not _is_math_reasoning:
                     _recent_text = tokenizer.decode(
                         generated_tokens[-_MARKUP_CHECK_WINDOW:],
                         skip_special_tokens=True,
@@ -820,14 +839,52 @@ class MetisInference:
                         )
                     # Path B: Entropy-only fast path — catches MathML/XML recitation
                     # where decision=NORMAL but entropy≈0 (structured markup output)
+                    # EXEMPT: math reasoning (digits + operators) naturally has low entropy
                     _ENTROPY_FLOOR = 0.1  # 3x below normal ceiling
-                    if not should_truncate_recitation and avg_h < _ENTROPY_FLOOR:
+                    if not should_truncate_recitation and avg_h < _ENTROPY_FLOOR and not _is_math_reasoning:
                         should_truncate_recitation = True
                         logger.info(
                             f"[METIS] Ultra-low entropy detected at step {step}: "
                             f"avg_H={avg_h:.3f} < {_ENTROPY_FLOOR} "
                             f"→ force-closing thinking (deterministic output ≠ reasoning)"
                         )
+
+                # L1.7: Semantic Stall Detector — catch "soft repetition"
+                # where vocabulary varies but meaning loops (e.g., "Let's analyze
+                # the first child" → "Re-evaluating the initial child" → same thing).
+                # Uses character 4-gram overlap: if >60% of recent 4-grams already
+                # appeared in earlier thinking text, the model is semantically stalled.
+                _STALL_MIN_TOKENS = 40  # Need enough text to compare
+                should_truncate_stall = False
+                if tokens_in_block >= _STALL_MIN_TOKENS and not should_truncate_recitation:
+                    _think_tok_count = min(tokens_in_block, len(generated_tokens))
+                    _think_text = tokenizer.decode(
+                        generated_tokens[-_think_tok_count:],
+                        skip_special_tokens=True,
+                    )
+                    if len(_think_text) >= 80:
+                        _split_point = len(_think_text) * 2 // 3
+                        _earlier = _think_text[:_split_point]
+                        _recent = _think_text[_split_point:]
+                        # Build 4-gram sets
+                        _N = 4
+                        _earlier_ngrams = set(
+                            _earlier[i:i+_N] for i in range(len(_earlier) - _N + 1)
+                        )
+                        _recent_ngrams = [
+                            _recent[i:i+_N] for i in range(len(_recent) - _N + 1)
+                        ]
+                        if _recent_ngrams:
+                            _overlap = sum(
+                                1 for ng in _recent_ngrams if ng in _earlier_ngrams
+                            ) / len(_recent_ngrams)
+                            if _overlap > 0.6:
+                                should_truncate_stall = True
+                                logger.info(
+                                    f"[METIS] Semantic stall at step {step}: "
+                                    f"4-gram overlap={_overlap:.0%} > 60% "
+                                    f"→ force-closing (paraphrasing, not progressing)"
+                                )
 
                 # L2: Dynamic budget exhaustion
                 should_truncate_budget = tokens_in_block >= dynamic_thinking_budget
@@ -842,7 +899,9 @@ class MetisInference:
                 # Graceful close: wait for sentence boundary (max grace tokens)
                 # Markup gets 0 grace — XML is garbage, not a sentence to finish
                 _CLOSE_GRACE = 0 if should_truncate_markup else 15
-                if should_truncate_recitation or should_truncate_budget or should_truncate_markup:
+                _should_close = (should_truncate_recitation or should_truncate_budget
+                                 or should_truncate_markup or should_truncate_stall)
+                if _should_close:
                     if not thinking_close_pending:
                         thinking_close_pending = True
                         thinking_close_since = step
@@ -914,26 +973,29 @@ class MetisInference:
                             f"[METIS] L6 Backtrack: deleted {draft_len} draft tokens, "
                             f"kept {len(think_tokens)} thinking tokens"
                         )
-                        draft_rollback_idx = -1
-                        think_block_start_idx = -1
+                    draft_rollback_idx = -1
+                    think_block_start_idx = -1
 
-                        # Rebuild KV cache without draft tokens
-                        if generated_tokens:
-                            gen_ids = torch.tensor([generated_tokens], device=model.device)
-                            full_input = torch.cat([prompt_ids, gen_ids], dim=1)
-                        else:
-                            full_input = prompt_ids
-                        with torch.no_grad():
-                            rebuild_out = model(
-                                input_ids=full_input, use_cache=True, return_dict=True,
-                            )
-                        past_key_values = rebuild_out.past_key_values
-                        logits = rebuild_out.logits[:, -1, :]
+                    # L7: Anti-Semantic-Drift — ALWAYS rebuild KV cache after
+                    # thinking closes. Without this, attention weights are still
+                    # biased toward old System 1 draft tokens, causing the model
+                    # to "forget" what System 2 just reasoned and output wrong answers.
+                    # Full rebuild forces re-attention over the entire sequence
+                    # (prompt + draft + thinking), giving thinking block proper weight.
+                    if generated_tokens:
+                        gen_ids = torch.tensor([generated_tokens], device=model.device)
+                        full_input = torch.cat([prompt_ids, gen_ids], dim=1)
                     else:
-                        draft_rollback_idx = -1
-                        think_block_start_idx = -1
+                        full_input = prompt_ids
+                    with torch.no_grad():
+                        rebuild_out = model(
+                            input_ids=full_input, use_cache=True, return_dict=True,
+                        )
+                    past_key_values = rebuild_out.past_key_values
+                    logits = rebuild_out.logits[:, -1, :]
+                    logger.info("[METIS] L7: Full KV rebuild after forced thinking close")
 
-                    # Re-sample from (possibly rebuilt) logits for the answer
+                    # Re-sample from rebuilt logits for the answer
                     next_token_id = self._cognitive_sample(
                         logits, signal, temperature, top_p, generated_tokens
                     )
@@ -1097,34 +1159,23 @@ class MetisInference:
                                 f"[METIS] L6 Backtrack (natural): deleted {draft_len} draft tokens, "
                                 f"kept {len(think_tokens)} thinking tokens"
                             )
-                            draft_rollback_idx = -1
-                            think_block_start_idx = -1
+                        draft_rollback_idx = -1
+                        think_block_start_idx = -1
 
-                            # Rebuild KV cache without draft tokens
-                            if generated_tokens:
-                                gen_ids = torch.tensor([generated_tokens], device=model.device)
-                                full_input = torch.cat([prompt_ids, gen_ids], dim=1)
-                            else:
-                                full_input = prompt_ids
-                            with torch.no_grad():
-                                rebuild_out = model(
-                                    input_ids=full_input, use_cache=True, return_dict=True,
-                                )
-                            past_key_values = rebuild_out.past_key_values
-                            logits = rebuild_out.logits[:, -1, :]
+                        # L7: Anti-Semantic-Drift — ALWAYS full KV rebuild
+                        # after natural thinking close. Same rationale as forced path.
+                        if generated_tokens:
+                            gen_ids = torch.tensor([generated_tokens], device=model.device)
+                            full_input = torch.cat([prompt_ids, gen_ids], dim=1)
                         else:
-                            draft_rollback_idx = -1
-                            think_block_start_idx = -1
-                            # Feed closing token to get fresh logits
-                            _close_input = torch.tensor([[next_token_id]], device=model.device)
-                            _close_out = model(
-                                input_ids=_close_input,
-                                past_key_values=past_key_values,
-                                use_cache=True,
-                                return_dict=True,
+                            full_input = prompt_ids
+                        with torch.no_grad():
+                            rebuild_out = model(
+                                input_ids=full_input, use_cache=True, return_dict=True,
                             )
-                            past_key_values = _close_out.past_key_values
-                            logits = _close_out.logits[:, -1, :]
+                        past_key_values = rebuild_out.past_key_values
+                        logits = rebuild_out.logits[:, -1, :]
+                        logger.info("[METIS] L7: Full KV rebuild after natural thinking close")
 
                         # Re-sample fresh answer token
                         next_token_id = self._cognitive_sample(
