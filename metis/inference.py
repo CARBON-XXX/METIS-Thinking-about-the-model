@@ -134,23 +134,67 @@ def _build_reasoning_scaffold(
     # Extract draft conclusion for System 2 to critique
     conclusion = _extract_last_sentence(draft_text)
 
-    # Anti-Sycophancy: if the prompt contains a counterfactual math premise,
-    # inject explicit "challenge the premise" instruction. Without this, the
-    # model's default behavior is to accommodate the premise (Logic Sycophancy).
-    counterfactual_guide = ""
-    if _l8_is_counterfactual(user_input):
-        counterfactual_guide = (
-            "WARNING: The premise contradicts standard arithmetic axioms. "
-            "Do NOT try to make it work by escaping to modular arithmetic, "
-            "rings, or redefining symbols. Instead, derive a contradiction (e.g., 1=2) "
-            "and explain how the Principle of Explosion (Ex Falso Quodlibet) "
-            "causes the formal system to collapse.\n"
-        )
+    # V10.3 Guided Doom: Instead of abstract warnings (which cause panic
+    # looping in 7B models), inject a complete proof chain that the model
+    # can follow step-by-step. It only needs to elaborate, not invent.
+    counterfactual_guide = _build_guided_doom(user_input)
 
     if conclusion:
         return f'{counterfactual_guide}"{q}"\n→ {conclusion}\n'
     else:
         return f'{counterfactual_guide}"{q}"\n'
+
+
+def _build_guided_doom(user_input: str) -> str:
+    """V10.3 Guided Doom: Build a complete proof chain for counterfactual premises.
+
+    Instead of telling the model WHAT to prove (which causes panic looping),
+    we show it HOW to prove it — a fill-in-the-blanks proof chain.
+
+    For a 7B model, this is the only way to get correct mathematical reasoning
+    on problems that require the Principle of Explosion.
+
+    Returns empty string if no counterfactual premise is detected.
+    """
+    # Extract the counterfactual equation: e.g., "如果 1+1=3" → (1, '+', 1, 3)
+    m = re.search(r'[如假][果设]\s*(\d+)\s*([+\-×÷*/])\s*(\d+)\s*[=＝]\s*(\d+)', user_input)
+    if not m:
+        m = re.search(r'(?:if|suppose|assume)\s+(\d+)\s*([+\-*/])\s*(\d+)\s*=\s*(\d+)', user_input, re.I)
+    if not m:
+        return ""
+
+    a, op, b, false_result = int(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4))
+
+    # Compute the real result under standard arithmetic
+    _ops = {'+': lambda x, y: x + y, '-': lambda x, y: x - y,
+            '*': lambda x, y: x * y, '×': lambda x, y: x * y,
+            '/': lambda x, y: x / y, '÷': lambda x, y: x / y}
+    op_fn = _ops.get(op)
+    if op_fn is None:
+        return ""
+    try:
+        real_result = int(op_fn(a, b))
+    except (ZeroDivisionError, ValueError):
+        return ""
+
+    if real_result == false_result:
+        return ""  # Not actually counterfactual
+
+    # Build the guided proof chain
+    diff = false_result - real_result  # e.g., 3 - 2 = 1 for "1+1=3"
+    return (
+        f"[PROOF PATH]\n"
+        f"1. Premise: {a}{op}{b} = {false_result} (given by user)\n"
+        f"2. Axiom:   {a}{op}{b} = {real_result} (standard arithmetic)\n"
+        f"3. From (1) and (2): {false_result} = {real_result}\n"
+        f"4. Subtract {real_result}: {false_result}-{real_result} = 0, "
+        f"so {false_result - real_result} = 0\n"
+        f"5. For any N: N × {diff} = N × 0 = 0, so N = 0\n"
+        f"6. ALL numbers equal 0. The formal system is destroyed.\n"
+        f"7. This is the Principle of Explosion (Ex Falso Quodlibet):\n"
+        f"   from a contradiction, ANY statement can be proven true.\n"
+        f"Follow this proof. Do NOT escape to modular arithmetic or redefine symbols.\n"
+    )
 
 
 def _l8_is_counterfactual(user_input: str) -> bool:
@@ -823,11 +867,10 @@ class MetisInference:
                         _rep_think_count = step - thinking_start_step
                         if verification_count == 0 and _l8_needs_verification(prompt, _rep_think_count):
                             verification_count += 1
-                            _verify_open = (
+                            _guided = _build_guided_doom(prompt)
+                            _verify_open = f"\n<thinking>\n{_guided}" if _guided else (
                                 "\n<thinking>\n"
-                                "Wait — my previous reasoning may contain errors. "
-                                "Let me check: does the premise contradict a basic axiom? "
-                                "If so, what breaks?\n"
+                                "Let me re-examine: what contradiction follows from this premise?\n"
                             )
                             _verify_ids = tokenizer.encode(_verify_open, add_special_tokens=False)
                             for tid in _verify_ids:
@@ -1135,11 +1178,10 @@ class MetisInference:
                     _forced_think_count = step - thinking_start_step
                     if verification_count == 0 and _l8_needs_verification(prompt, _forced_think_count):
                         verification_count += 1
-                        _verify_open = (
+                        _guided = _build_guided_doom(prompt)
+                        _verify_open = f"\n<thinking>\n{_guided}" if _guided else (
                             "\n<thinking>\n"
-                            "Wait — my previous reasoning may contain errors. "
-                            "Let me check: does the premise contradict a basic axiom? "
-                            "If so, what breaks?\n"
+                            "Let me re-examine: what contradiction follows from this premise?\n"
                         )
                         _verify_ids = tokenizer.encode(_verify_open, add_special_tokens=False)
                         for tid in _verify_ids:
@@ -1371,11 +1413,10 @@ class MetisInference:
                         # L8: Verification Cycle (same as forced path)
                         if verification_count == 0 and _l8_needs_verification(prompt, tokens_in_block):
                             verification_count += 1
-                            _verify_open = (
+                            _guided = _build_guided_doom(prompt)
+                            _verify_open = f"\n<thinking>\n{_guided}" if _guided else (
                                 "\n<thinking>\n"
-                                "Wait — my previous reasoning may contain errors. "
-                                "Let me check: does the premise contradict a basic axiom? "
-                                "If so, what breaks?\n"
+                                "Let me re-examine: what contradiction follows from this premise?\n"
                             )
                             _verify_ids = tokenizer.encode(_verify_open, add_special_tokens=False)
                             for tid in _verify_ids:
@@ -1730,7 +1771,7 @@ class MetisInference:
             r'If so,?\s*what breaks\??\n?',
             '', answer, flags=re.IGNORECASE,
         )
-        # Anti-Sycophancy scaffold remnants
+        # Anti-Sycophancy scaffold remnants (legacy versions)
         answer = re.sub(
             r'WARNING:?\s*The premise may contradict standard axioms\.?\s*'
             r'Do NOT try to make it work\.?\s*Instead,?\s*prove what breaks:?\s*'
@@ -1743,6 +1784,20 @@ class MetisInference:
             r'rings,?\s*or redefining symbols\.?\s*Instead,?\s*derive a contradiction[^.\n]*\s*'
             r'and explain how the Principle of Explosion[^.\n]*\s*'
             r'causes the formal system to collapse\.?\n?',
+            '', answer, flags=re.IGNORECASE,
+        )
+        # V10.3 Guided Doom scaffold remnants: [PROOF PATH] + numbered steps
+        answer = re.sub(
+            r'\[PROOF PATH\]\n(?:\d+\.\s+[^\n]+\n?)+',
+            '', answer,
+        )
+        answer = re.sub(
+            r'Follow this proof\.?\s*Do NOT escape to modular arithmetic or redefine symbols\.?\n?',
+            '', answer, flags=re.IGNORECASE,
+        )
+        # L8 V10.3 fallback scaffold
+        answer = re.sub(
+            r'Let me re-examine:?\s*what contradiction follows from this premise\??\n?',
             '', answer, flags=re.IGNORECASE,
         )
         # Strip MathML/XML garbage (incomplete blocks from force-stop)
