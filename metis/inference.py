@@ -76,29 +76,29 @@ def _build_reasoning_scaffold(
     draft_text: str = "",
 ) -> str:
     """
-    Build a zero-template reasoning scaffold for CoT injection.
+    Build a query-anchor reasoning scaffold for CoT injection.
 
-    v4 — "Zero Style Injection" (零模板):
+    v5 — "Query Anchor Only" (纯锚点):
 
-    PRINCIPLE: Scaffold = pure context, zero style.
-    Inject ONLY the raw facts (query + draft). No openers, no hooks,
-    no emotion words, no pre-written reactions.
+    PRINCIPLE: Scaffold = query anchor only. No draft, no "vs", no debate.
 
-    The model's own softmax distribution decides HOW to react.
-    Diversity comes from input differences, not from pre-written text.
-    Any pre-written opener ("Wait", "等等", "Hmm") becomes a template
-    the model will parrot instead of genuinely thinking.
+    WHY no draft?
+      1. The draft is already in KV cache — the model KNOWS what it wrote.
+         Re-injecting draft text is redundant and wastes thinking budget.
+      2. "X vs Y" format triggers Phantom Debate: the model's training data
+         associates "vs" with adversarial/reconciliation contexts, causing it
+         to fabricate non-existent opposing viewpoints.
+      3. The query alone is the strongest anchor. It reminds the model
+         WHAT the user actually asked, forcing re-evaluation of its own
+         draft against the original intent — without hallucinating a debate.
 
-    Two modes:
-      A. CRITIQUE: [Q: "..." | D: "..."]  — query vs draft side-by-side
-      B. COLD START: [Q: "..."]            — query only, no draft yet
-
-    After the bracket, the next token is 100% model-generated.
+    The scaffold is simply the quoted query. Nothing else.
+    The next token after the scaffold is 100% model-generated.
 
     Args:
         strategy: CoT strategy (used for logging only, not scaffold text)
         user_input: Original user prompt
-        draft_text: Model's draft output so far (triggers Critique mode)
+        draft_text: IGNORED. Kept for API compatibility.
 
     Returns:
         Scaffold string to inject after <thinking> tag
@@ -108,18 +108,7 @@ def _build_reasoning_scaffold(
     if len(user_input) > 120:
         q += "..."
 
-    # Draft preview: 60 chars max (enough to see the issue, not a full copy)
-    d = draft_text.strip()[:60]
-    if len(draft_text.strip()) > 60:
-        d += "..."
-
-    if d:
-        # MODE A: Critique — bare facts, zero style
-        # "query" vs "draft" — minimal, no markup, no labels
-        return f'"{q}" vs "{d}"\n'
-    else:
-        # MODE B: Cold Start — query only
-        return f'"{q}"\n'
+    return f'"{q}"\n'
 
 
 class MetisInference:
@@ -1169,7 +1158,7 @@ class MetisInference:
         # Remove incomplete tags: <thinking (no >) or </thinking (no >)
         # Complete tags already removed above, so only fragments remain
         answer = re.sub(r'</?thinking\b[^>]*', '', answer)
-        # Strip scaffold remnants: "..." vs "...", [Q: ...], [D: ...]
+        # Strip scaffold remnants (all historical formats)
         answer = re.sub(r'\[Q:.*?\]', '', answer)
         answer = re.sub(r'\[D:.*?\]', '', answer)
         answer = re.sub(r'"[^"]{0,150}"\s*vs\s*"[^"]{0,100}"', '', answer)
