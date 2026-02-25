@@ -70,35 +70,58 @@ def _has_cjk(text: str) -> bool:
     return False
 
 
+def _extract_last_sentence(text: str, max_len: int = 80) -> str:
+    """Extract the last complete sentence from draft text.
+
+    Used by v6 scaffold to give System 2 a concrete claim to verify,
+    without injecting the full draft (which wastes budget and dilutes focus).
+    """
+    if not text or not text.strip():
+        return ""
+    # Split on Chinese/English sentence terminators
+    sentences = re.split(r'(?<=[。！？.!?\n])', text.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
+    if not sentences:
+        return ""
+    last = sentences[-1]
+    if len(last) > max_len:
+        last = last[:max_len] + "..."
+    return last
+
+
 def _build_reasoning_scaffold(
     strategy: CoTStrategy,
     user_input: str,
     draft_text: str = "",
 ) -> str:
     """
-    Build a query-anchor reasoning scaffold for CoT injection.
+    Build a reasoning scaffold for CoT injection.
 
-    v5 — "Query Anchor Only" (纯锚点):
+    v6 — "Query + Draft Conclusion" (查询锚点 + 结论锚点):
 
-    PRINCIPLE: Scaffold = query anchor only. No draft, no "vs", no debate.
+    PRINCIPLE: Scaffold = query + last sentence of draft (if available).
 
-    WHY no draft?
-      1. The draft is already in KV cache — the model KNOWS what it wrote.
-         Re-injecting draft text is redundant and wastes thinking budget.
-      2. "X vs Y" format triggers Phantom Debate: the model's training data
-         associates "vs" with adversarial/reconciliation contexts, causing it
-         to fabricate non-existent opposing viewpoints.
-      3. The query alone is the strongest anchor. It reminds the model
-         WHAT the user actually asked, forcing re-evaluation of its own
-         draft against the original intent — without hallucinating a debate.
+    WHY re-introduce draft?
+      v5 removed draft entirely to prevent Phantom Debate ("X vs Y" → model
+      invents non-existent conflicts). But this severed the link between
+      System 1 and System 2 completely — System 2 couldn't critique what
+      System 1 said because it had no explicit reference to it.
 
-    The scaffold is simply the quoted query. Nothing else.
-    The next token after the scaffold is 100% model-generated.
+      Result: System 2 just re-ran System 1's reasoning and got the same
+      wrong answer (e.g., the 1/3 probability trap).
+
+    HOW to avoid Phantom Debate?
+      1. No "vs" token — use neutral arrow "→" (factual reference)
+      2. Only inject the LAST SENTENCE (the conclusion/claim), not full draft
+      3. Format: query\\n→ conclusion\\n
+         This tells System 2: "The question was X. You claimed Y. Verify."
+
+    COLD START (no draft): Falls back to query-only (same as v5).
 
     Args:
         strategy: CoT strategy (used for logging only, not scaffold text)
         user_input: Original user prompt
-        draft_text: IGNORED. Kept for API compatibility.
+        draft_text: System 1's draft output (last sentence extracted)
 
     Returns:
         Scaffold string to inject after <thinking> tag
@@ -108,7 +131,13 @@ def _build_reasoning_scaffold(
     if len(user_input) > 120:
         q += "..."
 
-    return f'"{q}"\n'
+    # Extract draft conclusion for System 2 to critique
+    conclusion = _extract_last_sentence(draft_text)
+
+    if conclusion:
+        return f'"{q}"\n→ {conclusion}\n'
+    else:
+        return f'"{q}"\n'
 
 
 class MetisInference:
@@ -1310,6 +1339,10 @@ class MetisInference:
         answer = re.sub(r'\[Q:.*?\]', '', answer)
         answer = re.sub(r'\[D:.*?\]', '', answer)
         answer = re.sub(r'"[^"]{0,150}"\s*vs\s*"[^"]{0,100}"', '', answer)
+        # v6: query + arrow + conclusion format
+        answer = re.sub(r'"[^"]{0,150}"\n→\s*[^\n]{0,100}\n?', '', answer)
+        # v5 fallback: query-only format
+        answer = re.sub(r'^"[^"]{0,150}"\n', '', answer)
         # Clean up excess whitespace left behind
         answer = re.sub(r'\n{3,}', '\n\n', answer).strip()
 
