@@ -76,103 +76,49 @@ def _build_reasoning_scaffold(
     draft_text: str = "",
 ) -> str:
     """
-    Build a language-adaptive reasoning scaffold for CoT injection.
+    Build a zero-template reasoning scaffold for CoT injection.
 
-    v3 — "Reflective Feedback Loop" (反思回环):
+    v4 — "Zero Style Injection" (零模板):
+
+    PRINCIPLE: Scaffold = pure context, zero style.
+    Inject ONLY the raw facts (query + draft). No openers, no hooks,
+    no emotion words, no pre-written reactions.
+
+    The model's own softmax distribution decides HOW to react.
+    Diversity comes from input differences, not from pre-written text.
+    Any pre-written opener ("Wait", "等等", "Hmm") becomes a template
+    the model will parrot instead of genuinely thinking.
 
     Two modes:
-      A. CRITIQUE mode (when draft_text is provided):
-         Feed BOTH original query AND model's own draft back to itself,
-         forcing a "double-take" — the model MUST compare what it wrote
-         against what the user actually asked.
-         This is the core mechanism that turns <thinking> from "recitation
-         space" into "genuine analysis space".
+      A. CRITIQUE: [Q: "..." | D: "..."]  — query vs draft side-by-side
+      B. COLD START: [Q: "..."]            — query only, no draft yet
 
-      B. COLD START mode (no draft — e.g., think=ON from beginning):
-         Same as v2: echo input + strong auto-regressive hook.
-
-    Design constraints:
-      - Same language as user input (CJK detection)
-      - Draft preview capped at 60 chars (enough to trigger comparison,
-        not enough to become the answer itself)
-      - Hook ends with colon/open phrase → forces model to complete it
-        with analysis, not knowledge
+    After the bracket, the next token is 100% model-generated.
 
     Args:
-        strategy: CoT strategy (determines scaffold flavor)
+        strategy: CoT strategy (used for logging only, not scaffold text)
         user_input: Original user prompt
         draft_text: Model's draft output so far (triggers Critique mode)
 
     Returns:
         Scaffold string to inject after <thinking> tag
     """
-    # Echo full input up to 120 chars
-    query_preview = user_input[:120].strip()
+    # Query preview: full input up to 120 chars
+    q = user_input[:120].strip()
     if len(user_input) > 120:
-        query_preview += "..."
+        q += "..."
 
-    # Draft preview: short enough to trigger comparison, not a full copy
-    draft_preview = draft_text.strip()[:60]
+    # Draft preview: 60 chars max (enough to see the issue, not a full copy)
+    d = draft_text.strip()[:60]
     if len(draft_text.strip()) > 60:
-        draft_preview += "..."
+        d += "..."
 
-    use_chinese = _has_cjk(user_input)
-    has_draft = bool(draft_preview.strip())
-
-    # ═══════════════════════════════════════════════════════
-    # MODE A: Critique Loop — "质疑" style (stream-of-consciousness)
-    # ═══════════════════════════════════════════════════════
-    # v4: NO TEMPLATES. NO HEADERS. NO FORMS.
-    # Start with a direct challenge/doubt. The model must continue
-    # the thought, not fill out a checklist.
-    # The scaffold IS the first sentence of genuine thinking.
-    if has_draft:
-        if use_chinese:
-            if strategy == CoTStrategy.REFLECTION:
-                return (
-                    f'等等，我刚才写了"{draft_preview}"——'
-                    f'但用户说的是"{query_preview}"，这里有个问题：'
-                )
-            else:
-                return (
-                    f'等等，用户说的是"{query_preview}"——'
-                    f'但我写了"{draft_preview}"，我是不是漏掉了什么？'
-                )
-        else:
-            if strategy == CoTStrategy.REFLECTION:
-                return (
-                    f'Wait — I wrote "{draft_preview}" '
-                    f'but the user said "{query_preview}". '
-                    f'Something is off: '
-                )
-            else:
-                return (
-                    f'Wait — the user said "{query_preview}" '
-                    f'but my draft says "{draft_preview}". '
-                    f'Did I miss something? '
-                )
-
-    # ═══════════════════════════════════════════════════════
-    # MODE B: Cold Start — challenge-first (no draft available)
-    # ═══════════════════════════════════════════════════════
-    if use_chinese:
-        if strategy == CoTStrategy.CLARIFICATION:
-            return f'等等，"{query_preview}"——这句话哪里不对？'
-        elif strategy == CoTStrategy.DECOMPOSITION:
-            return f'"{query_preview}"——这个问题比较复杂，先拆开看：'
-        elif strategy == CoTStrategy.REFLECTION:
-            return f'等等，重新看"{query_preview}"——我之前可能理解错了，因为'
-        else:
-            return f'等等，"{query_preview}"——'
+    if d:
+        # MODE A: Critique — bare facts, zero style
+        return f'[Q: "{q}" | D: "{d}"]\n'
     else:
-        if strategy == CoTStrategy.CLARIFICATION:
-            return f'Wait — "{query_preview}" — what\'s off here? '
-        elif strategy == CoTStrategy.DECOMPOSITION:
-            return f'"{query_preview}" — this needs breaking down: '
-        elif strategy == CoTStrategy.REFLECTION:
-            return f'Wait, re-reading "{query_preview}" — I may have misunderstood because '
-        else:
-            return f'Wait — "{query_preview}" — '
+        # MODE B: Cold Start — query only
+        return f'[Q: "{q}"]\n'
 
 
 class MetisInference:
