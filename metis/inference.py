@@ -273,6 +273,10 @@ class MetisInference:
         _RECITATION_FAST_RATIO = 0.75   # FAST ratio above this = not thinking
         _RECITATION_MIN_TOKENS = 16     # Don't check until scaffold has had effect
 
+        # Graceful thinking close state
+        thinking_close_pending = False
+        thinking_close_since = -1
+
         # Repetition detection state
         repetition_events = 0
         thinking_failed = False    # Set True when thinking was closed due to repetition
@@ -752,7 +756,30 @@ class MetisInference:
                         f"force-closing thinking block"
                     )
 
+                # Graceful close: wait for sentence boundary (max grace tokens)
+                _CLOSE_GRACE = 15
                 if should_truncate_recitation or should_truncate_budget:
+                    if not thinking_close_pending:
+                        thinking_close_pending = True
+                        thinking_close_since = step
+
+                if thinking_close_pending:
+                    # Check if current token is at a sentence boundary or grace expired
+                    _last_text = tokenizer.decode([next_token_id], skip_special_tokens=True)
+                    _at_boundary = any(c in _last_text for c in _SENTENCE_BREAKS)
+                    _grace_expired = (step - thinking_close_since) >= _CLOSE_GRACE
+                    if not (_at_boundary or _grace_expired):
+                        # Keep generating — wait for sentence end before closing
+                        generated_tokens.append(next_token_id)
+                        if self._on_token is not None and next_token_id != tokenizer.eos_token_id:
+                            token_text = tokenizer.decode([next_token_id], skip_special_tokens=True)
+                            vis_buffer.append((token_text, signal))
+                        if next_token_id == tokenizer.eos_token_id:
+                            break
+                        input_ids = torch.tensor([[next_token_id]], device=model.device)
+                        continue
+
+                    thinking_close_pending = False
                     # Inject </thinking>\n to close the block
                     close_tag = "\n</thinking>\n"
                     close_tag_ids = tokenizer.encode(
