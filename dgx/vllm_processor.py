@@ -56,7 +56,7 @@ class CUSUMConfig:
     surprise_weight: float = 0.3    # Weight of surprise in CUSUM
 
     # Dynamic K for early tokens (absorb prompt-transition entropy)
-    dynamic_k_tokens: int = 20      # First N tokens get boosted K
+    dynamic_k_tokens: int = 80      # First N tokens get boosted K (matches boundary.py)
     dynamic_k_boost: float = 0.5    # Additional K for early tokens
 
     # CoT boost parameters

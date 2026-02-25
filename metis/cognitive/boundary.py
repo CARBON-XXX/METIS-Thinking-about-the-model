@@ -197,7 +197,9 @@ class EpistemicBoundaryGuard:
         # ── Boundary Action (adaptive, based on CUSUM level) ──
         # SEEK: extreme sustained uncertainty OR early high semantic diversity (intent clarification)
         # If in early exploration with high diversity, prefer SEEK over HEDGE
-        is_intent_exploration = self._token_count <= 40 and sd > 0.8
+        # Broader window + relaxed diversity threshold to catch multi-meaning
+        # exploration (e.g., "agent" = software/AI/customer-service/physical)
+        is_intent_exploration = self._token_count <= 80 and sd >= 0.7
         
         # REFUSE: extreme sustained uncertainty + low confidence
         if self._cusum >= CUSUM_REFUSE_H and c < CONFIDENCE_REFUSE:

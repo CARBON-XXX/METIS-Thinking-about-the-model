@@ -139,7 +139,8 @@ impl BoundaryGuardNative {
 
         // ── Boundary actions (priority: REFUSE > SEEK > HEDGE > GENERATE) ──
         
-        let is_intent_exploration = self.tok_count <= 40 && sd > 0.8;
+        // Broader window + relaxed diversity to catch multi-meaning exploration
+        let is_intent_exploration = self.tok_count <= 80 && sd >= 0.7;
 
         // REFUSE: extreme sustained uncertainty + very low confidence
         if self.cusum >= self.refuse_h && confidence < self.conf_refuse {
