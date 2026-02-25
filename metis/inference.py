@@ -265,8 +265,6 @@ class MetisInference:
         boundary_interventions = 0
         was_refused = False
         consecutive_refuse = 0
-        cot_injected = False
-        cot_inject_token_idx = -1  # Token index where CoT was injected
         cot_strategies_used: List[CoTStrategy] = []
         seek_results: List[str] = []
         
@@ -415,10 +413,6 @@ class MetisInference:
                     is_thinking = True
                     thinking_start_step = step
                     self._cot_manager.record_injection(strategy)
-                    cot_injected = True
-                    # Record token position BEFORE the <thinking> tag
-                    # so we can cleanly split answer from thinking later
-                    cot_inject_token_idx = len(generated_tokens) - len(think_open_ids)
                     cot_strategies_used.append(strategy)
 
                     # L2: Dynamic thinking budget based on CUSUM magnitude
@@ -616,8 +610,6 @@ class MetisInference:
                         logits = open_out.logits[:, -1, :]
                         is_thinking = True
                         thinking_start_step = step
-                        cot_injected = True
-                        cot_inject_token_idx = len(generated_tokens) - len(think_open_ids)
                         # L2: Repetition-triggered thinking gets modest budget
                         dynamic_thinking_budget = 64
                         thinking_entropies.clear()
@@ -982,24 +974,16 @@ class MetisInference:
         if was_refused:
             raw_text = self._refuse_message
             thinking_text = ""
-        elif cot_injected and cot_inject_token_idx > 0:
-            # CoT was dynamically injected mid-generation.
-            # Answer = tokens BEFORE injection point (the partial answer).
-            # Everything after injection = thinking process (discard from output).
-            answer_tokens = generated_tokens[:cot_inject_token_idx]
-            thinking_tokens = generated_tokens[cot_inject_token_idx:]
-            raw_text = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
-            thinking_text = tokenizer.decode(thinking_tokens, skip_special_tokens=True)
-            # Clean any stray tags and scaffold remnants from the answer
-            raw_text = re.sub(r'</?thinking[^>]*>', '', raw_text)
-            # Strip scaffold patterns: "..." vs "...", [Q: ...], [D: ...]
-            raw_text = re.sub(r'\[Q:.*?\]', '', raw_text)
-            raw_text = re.sub(r'\[D:.*?\]', '', raw_text)
-            raw_text = re.sub(r'"[^"]{0,120}"\s*vs\s*"[^"]{0,80}"', '', raw_text)
-            raw_text = raw_text.strip()
         else:
-            # think=ON from start, or no thinking: use regex splitting
+            # Always use text-based splitting. It cleanly handles multiple dynamic CoT injections
+            # and is robust to unclosed thinking blocks.
             full_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            if use_thinking_protocol:
+                # If thinking was forced from the start, the initial <thinking> tag 
+                # was in the prompt, NOT in generated_tokens. 
+                # Prepend it so the regex can extract the initial thinking block.
+                full_text = "<thinking>\n" + full_text
+            
             raw_text, thinking_text = self._split_thinking(full_text)
 
         # --- Store text on trace for R_thinking_quality ---
@@ -1173,8 +1157,8 @@ class MetisInference:
             - answer_text: text with all thinking blocks removed, cleaned up
             - thinking_text: concatenated content of all thinking blocks
         """
-        # Match all <thinking>...</thinking> blocks (greedy, DOTALL)
-        pattern = re.compile(r'<thinking>(.*?)</thinking>', re.DOTALL)
+        # Match <thinking> blocks even if unclosed (missing </thinking> at the end)
+        pattern = re.compile(r'<thinking>(.*?)(?:</thinking>|$)', re.DOTALL)
         thinking_parts = pattern.findall(text)
         thinking_text = "\n".join(t.strip() for t in thinking_parts if t.strip())
 
@@ -1188,7 +1172,7 @@ class MetisInference:
         # Strip scaffold remnants: "..." vs "...", [Q: ...], [D: ...]
         answer = re.sub(r'\[Q:.*?\]', '', answer)
         answer = re.sub(r'\[D:.*?\]', '', answer)
-        answer = re.sub(r'"[^"]{0,120}"\s*vs\s*"[^"]{0,80}"', '', answer)
+        answer = re.sub(r'"[^"]{0,150}"\s*vs\s*"[^"]{0,100}"', '', answer)
         # Clean up excess whitespace left behind
         answer = re.sub(r'\n{3,}', '\n\n', answer).strip()
 
