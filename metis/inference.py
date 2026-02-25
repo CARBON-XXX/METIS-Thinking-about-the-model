@@ -140,9 +140,11 @@ def _build_reasoning_scaffold(
     counterfactual_guide = ""
     if _l8_is_counterfactual(user_input):
         counterfactual_guide = (
-            "WARNING: The premise may contradict standard axioms. "
-            "Do NOT try to make it work. Instead, prove what breaks: "
-            "derive a contradiction (e.g., 0=1) and explain the consequences.\n"
+            "WARNING: The premise contradicts standard arithmetic axioms. "
+            "Do NOT try to make it work by escaping to modular arithmetic, "
+            "rings, or redefining symbols. Instead, derive a contradiction (e.g., 1=2) "
+            "and explain how the Principle of Explosion (Ex Falso Quodlibet) "
+            "causes the formal system to collapse.\n"
         )
 
     if conclusion:
@@ -1733,6 +1735,14 @@ class MetisInference:
             r'WARNING:?\s*The premise may contradict standard axioms\.?\s*'
             r'Do NOT try to make it work\.?\s*Instead,?\s*prove what breaks:?\s*'
             r'derive a contradiction[^.\n]*\.?\n?',
+            '', answer, flags=re.IGNORECASE,
+        )
+        answer = re.sub(
+            r'WARNING:?\s*The premise contradicts standard arithmetic axioms\.?\s*'
+            r'Do NOT try to make it work by escaping to modular arithmetic,?\s*'
+            r'rings,?\s*or redefining symbols\.?\s*Instead,?\s*derive a contradiction[^.\n]*\s*'
+            r'and explain how the Principle of Explosion[^.\n]*\s*'
+            r'causes the formal system to collapse\.?\n?',
             '', answer, flags=re.IGNORECASE,
         )
         # Strip MathML/XML garbage (incomplete blocks from force-stop)
