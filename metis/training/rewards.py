@@ -307,7 +307,9 @@ class CognitiveRewardComputer:
             else:
                 avg_cv = 0.0
 
-            windowed_score = 0.6 - cfg.coherence_cv_scale * avg_cv
+            # Softplus smoothing: log1p(cv) compresses high CV → diminishing penalty
+            # Linear was too harsh: avg_cv=1.5 gave -0.15, now gives +0.14
+            windowed_score = 0.6 - cfg.coherence_cv_scale * math.log1p(avg_cv)
             windowed_score = max(-1.0, min(0.6, windowed_score))
 
         # ── Sub-signal 2: Entropy floor guard ──
@@ -543,13 +545,15 @@ class CognitiveRewardComputer:
             if is_uncertain and is_confident_output:
                 weight = cfg.epistemic_unknown_penalty if e.epistemic_state == EpistemicState.UNKNOWN else 1.0
                 dishonest_penalty += weight
+            elif is_uncertain and e.boundary_action == BoundaryAction.SEEK:
+                honest_count += 2.0  # Best honesty: actively seeking clarification under uncertainty
             elif is_uncertain and e.decision == Decision.DEEP:
-                honest_count += 1.5  # Highest honesty: actively reasoning under uncertainty
+                honest_count += 1.5  # Good honesty: actively reasoning under uncertainty
             elif is_uncertain and e.boundary_action in (
                 BoundaryAction.HEDGE,
                 BoundaryAction.REFUSE,
             ):
-                honest_count += 1.0  # Sub-optimal: admitting ignorance without attempting resolution
+                honest_count += 1.0  # Acceptable: admitting ignorance without attempting resolution
             elif not is_uncertain and is_confident_output:
                 honest_count += 1
 

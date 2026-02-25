@@ -33,15 +33,15 @@ pub struct BoundaryGuardNative {
 impl BoundaryGuardNative {
     #[new]
     #[pyo3(signature = (
-        uncertain_z = 0.8,
+        uncertain_z = 1.0,
         unknown_z = 1.2,
         known_z = -0.5,
         min_warmup = 4,
-        cusum_k = 0.3,
-        hedge_h = 2.0,
-        refuse_h = 5.0,
-        decay = 0.92,
-        surprise_base = 1.5,
+        cusum_k = 0.5,
+        hedge_h = 4.0,
+        refuse_h = 8.0,
+        decay = 0.85,
+        surprise_base = 2.5,
         surprise_w = 0.25,
         conf_refuse = 0.3,
         conf_seek = 0.7,
@@ -106,10 +106,16 @@ impl BoundaryGuardNative {
             return (1, 0, String::new()); // LIKELY, GENERATE
         }
 
+        // ── Dynamic Allowance (K) ──
+        let mut current_k = self.cusum_k;
+        if self.tok_count <= 20 {
+            current_k = self.cusum_k + 0.5;
+        }
+
         // ── CUSUM update ──
         // Positive z above allowance: accumulate weighted by semantic diversity
-        if z > self.cusum_k {
-            self.cusum += (z - self.cusum_k) * sd;
+        if z > current_k {
+            self.cusum += (z - current_k) * sd;
         } else if z < 0.0 {
             // Confident token: geometric decay
             self.cusum *= self.decay;
@@ -132,6 +138,8 @@ impl BoundaryGuardNative {
         };
 
         // ── Boundary actions (priority: REFUSE > SEEK > HEDGE > GENERATE) ──
+        
+        let is_intent_exploration = self.tok_count <= 40 && sd > 0.8;
 
         // REFUSE: extreme sustained uncertainty + very low confidence
         if self.cusum >= self.refuse_h && confidence < self.conf_refuse {
@@ -161,6 +169,16 @@ impl BoundaryGuardNative {
         if self.cusum >= self.hedge_h {
             let v = self.cusum;
             self.cusum = 0.0;
+            
+            if is_intent_exploration {
+                self.action_counts[2] += 1;
+                return (
+                    2,
+                    2,
+                    format!("Intent clarification needed (cusum={v:.1})"),
+                );
+            }
+            
             self.action_counts[1] += 1;
             return (
                 2,

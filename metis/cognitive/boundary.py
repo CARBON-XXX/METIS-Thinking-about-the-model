@@ -25,7 +25,7 @@ _STATE_FROM_INT = [EpistemicState.KNOWN, EpistemicState.LIKELY, EpistemicState.U
 _ACTION_FROM_INT = [BoundaryAction.GENERATE, BoundaryAction.HEDGE, BoundaryAction.SEEK, BoundaryAction.REFUSE]
 
 # ── Constants ──
-Z_UNCERTAIN_DEFAULT = 0.8       # z > 0.8 → UNCERTAIN (lowered for short sequences)
+Z_UNCERTAIN_DEFAULT = 1.0       # z > 1.0 → UNCERTAIN (1 stddev above mean)
 Z_UNKNOWN_DEFAULT = 1.2         # z > 1.2 → UNKNOWN (lowered for short sequences)
 Z_KNOWN_DEFAULT = -0.5          # z < -0.5 → KNOWN
 MIN_WARMUP_TOKENS = 4           # Cold-start cognitive events (was 20 — too large for short gen)
@@ -47,15 +47,15 @@ CONFIDENCE_KNOWN = 0.7          # c > 0.7 → KNOWN (when low z)
 #   - Gradual forgetting, not hard reset → tolerates brief confident interjections
 #
 # After triggering (HEDGE/REFUSE): S(t) = 0 (reset, ready for next detection)
-CUSUM_K = 0.3               # Allowance: z < 0.3 absorbed as normal variation
-CUSUM_HEDGE_H = 2.0         # HEDGE threshold (~5 tokens of moderate uncertainty)
-CUSUM_REFUSE_H = 5.0        # REFUSE threshold (sustained high uncertainty)
-CUSUM_DECAY = 0.92          # Decay factor on confident tokens (slower forgetting)
+CUSUM_K = 0.5               # Allowance: z < 0.5 absorbed as lexical variation
+CUSUM_HEDGE_H = 4.0         # HEDGE threshold (~8 tokens of genuine uncertainty)
+CUSUM_REFUSE_H = 8.0        # REFUSE threshold (sustained high uncertainty)
+CUSUM_DECAY = 0.85          # Decay factor on confident tokens (faster forgetting)
 
 # Surprise-based CUSUM boost (prediction error feedback)
 # When the model generates tokens it doesn't believe in (high surprise),
 # this accelerates the CUSUM independently of z-score.
-SURPRISE_BASELINE = 1.5     # bits; lowered to catch more prediction errors
+SURPRISE_BASELINE = 2.5     # bits; moderate surprise is normal, only flag high
 SURPRISE_WEIGHT = 0.25      # CUSUM contribution per excess surprise bit
 
 
@@ -133,18 +133,18 @@ class EpistemicBoundaryGuard:
     ) -> Tuple[EpistemicState, BoundaryAction, str]:
         """
         Evaluate epistemic boundary using CUSUM control chart.
-        
-        Args:
-            signal: METIS cognitive signal (z_score, confidence, semantic_diversity)
-            thresholds: (optional) dynamically computed (z_uncertain, z_unknown)
-            
-        Returns:
-            (epistemic_state, boundary_action, explanation)
         """
         z = signal.z_score
         c = signal.confidence
         sd = signal.semantic_diversity
         self._token_count += 1
+        
+        # ── Dynamic Allowance (K) ──
+        # Higher tolerance in the early generation phase to allow for intent exploration
+        # (e.g., when the prompt is short/ambiguous like "A) Yes")
+        current_k = CUSUM_K
+        if self._token_count <= 20:
+            current_k = CUSUM_K + 0.5  # K=1.0 for first 20 tokens
         
         # ── Rust fast path ──
         if self._native is not None:
@@ -171,8 +171,8 @@ class EpistemicBoundaryGuard:
         # Two independent contributions:
         # 1. z-score * sd (distribution-level uncertainty)
         # 2. surprise boost (token-level prediction error)
-        if z > CUSUM_K:
-            self._cusum += (z - CUSUM_K) * sd
+        if z > current_k:
+            self._cusum += (z - current_k) * sd
         elif z < 0:
             # Confident token → decay accumulated uncertainty
             self._cusum *= CUSUM_DECAY
@@ -195,6 +195,10 @@ class EpistemicBoundaryGuard:
             state = EpistemicState.LIKELY
         
         # ── Boundary Action (adaptive, based on CUSUM level) ──
+        # SEEK: extreme sustained uncertainty OR early high semantic diversity (intent clarification)
+        # If in early exploration with high diversity, prefer SEEK over HEDGE
+        is_intent_exploration = self._token_count <= 40 and sd > 0.8
+        
         # REFUSE: extreme sustained uncertainty + low confidence
         if self._cusum >= CUSUM_REFUSE_H and c < CONFIDENCE_REFUSE:
             cusum_val = self._cusum
@@ -205,7 +209,7 @@ class EpistemicBoundaryGuard:
                 f"Sustained extreme uncertainty (cusum={cusum_val:.1f})",
             )
         
-        # SEEK: high sustained uncertainty + moderate confidence
+        # SEEK: high sustained uncertainty + moderate confidence, OR intent clarification
         if self._cusum >= CUSUM_REFUSE_H and c < CONFIDENCE_SEEK:
             cusum_val = self._cusum
             self._cusum = 0.0
@@ -214,11 +218,20 @@ class EpistemicBoundaryGuard:
                 BoundaryAction.SEEK,
                 f"External verification needed (cusum={cusum_val:.1f})",
             )
-        
+            
         # HEDGE: moderate sustained uncertainty
         if self._cusum >= CUSUM_HEDGE_H:
             cusum_val = self._cusum
             self._cusum = 0.0  # Reset after triggering
+            
+            # Upgrade HEDGE to SEEK if it looks like intent exploration
+            if is_intent_exploration:
+                return self._emit(
+                    EpistemicState.UNCERTAIN,
+                    BoundaryAction.SEEK,
+                    f"Intent clarification needed (cusum={cusum_val:.1f})",
+                )
+                
             return self._emit(
                 EpistemicState.UNCERTAIN,
                 BoundaryAction.HEDGE,

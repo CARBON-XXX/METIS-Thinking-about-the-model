@@ -65,10 +65,10 @@ class MetisInference:
         metis: Metis,
         # System 2 trigger conditions
         system2_deep_ratio: float = 0.15,
-        system2_uncertainty_score: float = 0.3,
+        system2_uncertainty_score: float = 2.0,  # 50% of CUSUM_HEDGE_H=4.0
         # Boundary behavior
         hedge_prefix: str = "",
-        hedge_suffix: str = "\n\n(Note: I am not entirely sure about this answer. Please verify with other sources.)",
+        hedge_suffix: str = "",  # Hedge is metadata-only; text injection removed to preserve natural output
         refuse_message: str = "I apologize, but this question is beyond my reliable knowledge base. I cannot provide a certain answer.",
         # REFUSE strategy
         refuse_grace_period: int = 8,
@@ -871,25 +871,32 @@ class MetisInference:
         )
         boundary_ratio = n_boundary / max(n_signals, 1)
 
+        # Hedge requires strong convergent evidence:
+        #   1. CUSUM HEDGE event: strong standalone (boundary guard explicitly fired)
+        #   2. SE uncertain + moderate CUSUM: two independent signals agree
+        #   CUSUM accumulation alone does NOT trigger hedge — it only gates SE verification
+        #   (handled upstream in _run_system2_verification).
+        se_uncertain = se_result is not None and se_result.is_uncertain
         should_hedge = (
             not was_refused
             and (
                 final_signal.boundary_action == BoundaryAction.HEDGE
-                or uncertainty >= self._system2_uncertainty_score
-                or (se_result is not None and se_result.is_uncertain)
+                or (se_uncertain and uncertainty >= self._system2_uncertainty_score * 0.5)
             )
         )
 
         if should_hedge:
             was_hedged = True
-            final_text = self._hedge_prefix + raw_text + self._hedge_suffix
 
         # Metacognitive regulation: supplement actions based on introspection
         if not was_hedged and not was_refused:
             regulation = self._metis.regulate(meta_judgment)
             if regulation["should_hedge"]:
                 was_hedged = True
-                final_text = self._hedge_prefix + raw_text + self._hedge_suffix
+
+        # Apply text prefix/suffix only if explicitly provided (non-empty)
+        if was_hedged and (self._hedge_prefix or self._hedge_suffix):
+            final_text = self._hedge_prefix + raw_text + self._hedge_suffix
 
         # --- Introspection summary ---
         introspection_parts = self._build_introspection(
