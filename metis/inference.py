@@ -425,8 +425,8 @@ class MetisInference:
                     # L2: Dynamic thinking budget based on CUSUM magnitude
                     # Higher CUSUM at trigger = deeper confusion = more thinking time
                     # Note: CUSUM was just reset by record_injection(), use pre-reset stats
-                    _THINK_BUDGET_MIN = 24   # 1-2 sentences of analysis
-                    _THINK_BUDGET_MAX = 128  # No encyclopedias allowed
+                    _THINK_BUDGET_MIN = 32   # 1-2 sentences of analysis
+                    _THINK_BUDGET_MAX = 256  # Enough for truth tables / multi-step verification
                     _cusum_at_trigger = signal.z_score  # Use z-score as proxy (CUSUM already reset)
                     _cusum_ratio = min(max(_cusum_at_trigger / 2.0, 0.0), 2.0)
                     dynamic_thinking_budget = int(
@@ -624,8 +624,8 @@ class MetisInference:
                         logits = open_out.logits[:, -1, :]
                         is_thinking = True
                         thinking_start_step = step
-                        # L2: Repetition-triggered thinking gets modest budget
-                        dynamic_thinking_budget = 64
+                        # L2: Repetition-triggered thinking gets generous budget
+                        dynamic_thinking_budget = 128
                         thinking_entropies.clear()
                         thinking_decisions.clear()
 
