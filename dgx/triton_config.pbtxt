@@ -1,0 +1,96 @@
+# Triton Inference Server — METIS Model Configuration
+# Target: DGX Spark (Grace Blackwell, 128GB unified memory)
+#
+# Deployment architecture:
+#   Client → Triton (gRPC/HTTP) → vLLM backend → Model + METIS LogitsProcessor
+#
+# Usage:
+#   1. Copy this file to model_repository/metis_llm/config.pbtxt
+#   2. Place model weights in model_repository/metis_llm/1/
+#   3. Start: tritonserver --model-repository=model_repository
+#
+# Note: Triton's vLLM backend handles tokenization, KV cache, and batching.
+#       METIS cognitive monitoring runs as a LogitsProcessor inside vLLM.
+
+name: "metis_llm"
+platform: "vllm"
+max_batch_size: 0  # vLLM handles dynamic batching internally
+
+input [
+  {
+    name: "text_input"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  },
+  {
+    name: "stream"
+    data_type: TYPE_BOOL
+    dims: [ 1 ]
+    optional: true
+  },
+  {
+    name: "max_tokens"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+    optional: true
+  },
+  {
+    name: "temperature"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+    optional: true
+  },
+  {
+    name: "top_p"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+    optional: true
+  }
+]
+
+output [
+  {
+    name: "text_output"
+    data_type: TYPE_STRING
+    dims: [ -1 ]
+  }
+]
+
+# vLLM backend parameters
+parameters {
+  key: "model"
+  value: { string_value: "Qwen/Qwen2.5-72B-Instruct" }
+}
+parameters {
+  key: "dtype"
+  value: { string_value: "bfloat16" }
+}
+parameters {
+  key: "gpu_memory_utilization"
+  value: { string_value: "0.85" }
+}
+parameters {
+  key: "max_model_len"
+  value: { string_value: "8192" }
+}
+parameters {
+  key: "tensor_parallel_size"
+  value: { string_value: "1" }
+}
+parameters {
+  key: "trust_remote_code"
+  value: { string_value: "true" }
+}
+parameters {
+  key: "enforce_eager"
+  value: { string_value: "false" }
+}
+
+# Instance configuration
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
