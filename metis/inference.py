@@ -84,17 +84,17 @@ def _build_reasoning_scaffold(
         preview += "..."
 
     if strategy == CoTStrategy.CLARIFICATION:
-        # Ambiguity/typo detection scaffold
+        # Ambiguity/typo detection scaffold (strongest typo focus)
         return (
             f'The user wrote: "{preview}"\n'
-            f'Let me check if there are typos, missing words, or ambiguity. '
+            f'Analysis of input quality and potential issues: '
         )
     elif strategy == CoTStrategy.DECOMPOSITION:
         # Logical decomposition scaffold
         return (
             f'The question is: "{preview}"\n'
             f'This requires step-by-step analysis.\n'
-            f'Step 1: '
+            f'Step 1: identify what exactly is being asked. '
         )
     elif strategy == CoTStrategy.REFLECTION:
         # Self-correction scaffold
@@ -103,10 +103,12 @@ def _build_reasoning_scaffold(
             f'What I said so far might be wrong because '
         )
     else:
-        # STANDARD: intent analysis scaffold
+        # STANDARD: intent + typo analysis scaffold
+        # Always check for typos/ambiguity — this catches cases like
+        # "蜂鸟是什么可" where the real question is hidden behind a typo.
         return (
             f'The user asked: "{preview}"\n'
-            f'Before answering, let me analyze what they really want to know. '
+            f'Analysis of user intent and potential errors: '
         )
 
 
