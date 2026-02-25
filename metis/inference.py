@@ -1002,6 +1002,12 @@ class MetisInference:
             full_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
             raw_text, thinking_text = self._split_thinking(full_text)
 
+        # --- Store text on trace for R_thinking_quality ---
+        trace = self._metis.trace
+        if trace is not None:
+            trace.thinking_text = thinking_text
+            trace.answer_text = raw_text
+
         # --- System 2 verification (Kuhn et al. SE) ---
         se_result, system2_triggered, was_verified, raw_text = (
             self._run_system2_verification(

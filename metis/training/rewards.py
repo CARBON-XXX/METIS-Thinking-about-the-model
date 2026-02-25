@@ -11,13 +11,14 @@ Unlike LLM-as-judge reward models, these rewards are:
 
 Reward Components:
 ═══════════════════════════════════════════════════════════════════
-R_total = w₁·R_coh + w₂·R_cal + w₃·R_phase + w₄·R_epist + w₅·R_eff
+R_total = w₁·R_coh + w₂·R_cal + w₃·R_phase + w₄·R_epist + w₅·R_eff + w₆·R_think
 
-R_coh   : Coherence      — entropy stability (low variance = smooth reasoning)
+R_coh   : Coherence       — entropy stability (low variance = smooth reasoning)
 R_cal   : Calibration     — confidence-surprise alignment (penalize overconfidence)
 R_phase : Phase Quality   — penalize confusion, reward natural reasoning arcs
 R_epist : Epistemic Honor — appropriate uncertainty expression
 R_eff   : Efficiency      — don't overthink simple things
+R_think : Thinking Quality — penalize thinking-answer overlap (recitation detection)
 ═══════════════════════════════════════════════════════════════════
 
 All component rewards are normalized to [-1, 1].
@@ -25,6 +26,7 @@ All component rewards are normalized to [-1, 1].
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -93,6 +95,11 @@ class RewardConfig:
     # Efficiency: target FAST ratio (domain-dependent)
     efficiency_target_fast: float = 0.3
 
+    # Thinking quality: penalize thinking-answer overlap (recitation detection)
+    w_thinking_quality: float = 0.0        # 0.0 = disabled by default (no thinking in training)
+    thinking_overlap_threshold: float = 0.3  # Jaccard overlap above this → penalty
+    thinking_ngram_size: int = 2            # Character n-gram size for overlap
+
     # Length penalty: slight preference for concise responses
     length_penalty_threshold: int = 512     # tokens
     length_penalty_scale: float = 0.001     # per extra token
@@ -114,6 +121,7 @@ class RewardBreakdown:
     phase_quality: float = 0.0
     epistemic_honesty: float = 0.0
     efficiency: float = 0.0
+    thinking_quality: float = 0.0
 
     # Length penalty (subtracted from total)
     length_penalty: float = 0.0
@@ -129,6 +137,7 @@ class RewardBreakdown:
             "phase_quality": round(self.phase_quality, 4),
             "epistemic_honesty": round(self.epistemic_honesty, 4),
             "efficiency": round(self.efficiency, 4),
+            "thinking_quality": round(self.thinking_quality, 4),
             "length_penalty": round(self.length_penalty, 4),
             **{k: round(v, 4) for k, v in self.diagnostics.items()},
         }
@@ -207,6 +216,12 @@ class CognitiveRewardComputer:
         if n > cfg.length_penalty_threshold:
             breakdown.length_penalty = (n - cfg.length_penalty_threshold) * cfg.length_penalty_scale
 
+        # Thinking quality (only if text available on trace)
+        if trace.thinking_text and trace.answer_text:
+            breakdown.thinking_quality = self._reward_thinking_quality(
+                trace.thinking_text, trace.answer_text
+            )
+
         # Weighted total
         breakdown.total = (
             cfg.w_coherence * breakdown.coherence
@@ -214,6 +229,7 @@ class CognitiveRewardComputer:
             + cfg.w_phase * breakdown.phase_quality
             + cfg.w_epistemic * breakdown.epistemic_honesty
             + cfg.w_efficiency * breakdown.efficiency
+            + cfg.w_thinking_quality * breakdown.thinking_quality
             + completeness_bonus
             - breakdown.length_penalty
         )
@@ -255,6 +271,15 @@ class CognitiveRewardComputer:
             breakdown.diagnostics["degenerate"] = 1.0
             if "entropy_var" in r:
                 breakdown.diagnostics["entropy_var"] = r["entropy_var"]
+
+        # Thinking quality: computed in Python (Rust has no text access)
+        cfg = self._config
+        if cfg.w_thinking_quality > 0 and trace.thinking_text and trace.answer_text:
+            breakdown.thinking_quality = self._reward_thinking_quality(
+                trace.thinking_text, trace.answer_text
+            )
+            breakdown.total += cfg.w_thinking_quality * breakdown.thinking_quality
+
         return breakdown
 
     # ═══════════════════════════════════════════════════════
@@ -640,4 +665,85 @@ class CognitiveRewardComputer:
         length_factor = min(1.0, n / 40.0)
 
         reward = (appropriateness + resolution_bonus) * length_factor
+        return max(-1.0, min(1.0, reward))
+
+    # ═══════════════════════════════════════════════════════
+    # R₆: Thinking Quality — thinking-answer overlap penalty
+    # ═══════════════════════════════════════════════════════
+
+    def _reward_thinking_quality(
+        self, thinking_text: str, answer_text: str
+    ) -> float:
+        """
+        Thinking quality reward: penalize recitation in thinking blocks.
+
+        Core idea: if <thinking> content has high n-gram overlap with the
+        final answer, the model is just reciting/dumping knowledge in the
+        thinking block instead of genuinely analyzing. Real analysis should
+        produce DIFFERENT text from the answer — meta-reasoning about the
+        problem, not a rough draft of the answer itself.
+
+        Algorithm:
+          1. Extract character-level n-grams from both texts
+          2. Compute Jaccard similarity: |A ∩ B| / |A ∪ B|
+          3. High overlap (>threshold) → penalty (recitation)
+          4. Low overlap (<threshold/2) → bonus (genuine analysis)
+
+        Character-level n-grams work for both Chinese (no word boundaries)
+        and English. Bigrams are the default (cfg.thinking_ngram_size=2).
+
+        Returns:
+            float in [-1.0, 1.0]
+            - Positive: thinking is genuinely different from answer (good)
+            - Negative: thinking overlaps heavily with answer (recitation)
+            - 0.0: no thinking text available
+        """
+        cfg = self._config
+
+        # Clean inputs: strip whitespace, tags, scaffold remnants
+        t = thinking_text.strip()
+        a = answer_text.strip()
+
+        if not t or not a:
+            return 0.0
+
+        # Remove <thinking>/<highlight> and other tags from thinking
+        t = re.sub(r'<[^>]+>', '', t).strip()
+        # Remove scaffold remnants from thinking
+        t = re.sub(r'"[^"]{0,120}"\s*vs\s*"[^"]{0,80}"', '', t).strip()
+
+        if len(t) < 4 or len(a) < 4:
+            return 0.0  # Too short to meaningfully compare
+
+        # Extract character-level n-grams
+        n = cfg.thinking_ngram_size
+        t_ngrams = set()
+        for i in range(len(t) - n + 1):
+            t_ngrams.add(t[i:i + n])
+
+        a_ngrams = set()
+        for i in range(len(a) - n + 1):
+            a_ngrams.add(a[i:i + n])
+
+        if not t_ngrams or not a_ngrams:
+            return 0.0
+
+        # Jaccard similarity: |intersection| / |union|
+        intersection = len(t_ngrams & a_ngrams)
+        union = len(t_ngrams | a_ngrams)
+        jaccard = intersection / max(union, 1)
+
+        threshold = cfg.thinking_overlap_threshold  # default 0.3
+
+        if jaccard > threshold:
+            # High overlap → recitation penalty
+            # Scale: 0.3 → 0.0, 0.6 → -0.5, 0.9 → -1.0
+            excess = (jaccard - threshold) / (1.0 - threshold)
+            reward = -min(1.0, excess * 1.5)
+        else:
+            # Low overlap → genuine thinking bonus
+            # Scale: 0.3 → 0.0, 0.15 → +0.5, 0.0 → +1.0
+            deficit = (threshold - jaccard) / max(threshold, 1e-6)
+            reward = min(1.0, deficit)
+
         return max(-1.0, min(1.0, reward))

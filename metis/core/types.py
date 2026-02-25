@@ -197,6 +197,10 @@ class CognitiveTrace:
     peak_surprise: float = 0.0
     high_surprise_count: int = 0        # Tokens where surprise > 2*mean
 
+    # Text content for R_thinking_quality (set by inference pipeline)
+    thinking_text: str = ""              # Content inside <thinking> blocks
+    answer_text: str = ""                # Final answer text (post-thinking)
+
     def add_event(self, signal: 'CognitiveSignal', step: int) -> None:
         """Create event from CognitiveSignal and append"""
         event = CognitiveEvent(
@@ -252,6 +256,7 @@ class CognitiveTrace:
             "peak_surprise": round(self.peak_surprise, 4),
             "high_surprise_count": self.high_surprise_count,
             "entropy_trend_summary": self.entropy_trend_summary,
+            "has_thinking": bool(self.thinking_text),
             "events": [_event_dict(e) for e in self.events],
         }
 
