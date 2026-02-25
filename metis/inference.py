@@ -1041,7 +1041,7 @@ class MetisInference:
             was_refused=was_refused,
             was_verified=was_verified,
             was_hedged=was_hedged,
-            cot_injected=cot_injected,
+            cot_injected=bool(cot_strategies_used),
             hallucination_corrected=hallucination_corrected,
             final_signal=final_signal,
             se_result=se_result,
