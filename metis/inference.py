@@ -134,20 +134,50 @@ def _build_reasoning_scaffold(
     # Extract draft conclusion for System 2 to critique
     conclusion = _extract_last_sentence(draft_text)
 
+    # Anti-Sycophancy: if the prompt contains a counterfactual math premise,
+    # inject explicit "challenge the premise" instruction. Without this, the
+    # model's default behavior is to accommodate the premise (Logic Sycophancy).
+    counterfactual_guide = ""
+    if _l8_is_counterfactual(user_input):
+        counterfactual_guide = (
+            "WARNING: The premise may contradict standard axioms. "
+            "Do NOT try to make it work. Instead, prove what breaks: "
+            "derive a contradiction (e.g., 0=1) and explain the consequences.\n"
+        )
+
     if conclusion:
-        return f'"{q}"\n→ {conclusion}\n'
+        return f'{counterfactual_guide}"{q}"\n→ {conclusion}\n'
     else:
-        return f'"{q}"\n'
+        return f'{counterfactual_guide}"{q}"\n'
+
+
+def _l8_is_counterfactual(user_input: str) -> bool:
+    """Detect counterfactual mathematical premises in user input.
+
+    Matches patterns like "如果 1+1=3" or "假设 2+2=5" — hypothetical
+    premises that contradict standard axioms. These are the highest-risk
+    prompts for Logic Sycophancy.
+    """
+    # Chinese: 如果/假设 + digit + operator + digit + = + digit
+    if re.search(r'[如假][果设]\s*\d+\s*[+\-×÷*/]\s*\d+\s*[=＝]\s*\d+', user_input):
+        return True
+    # English: if/suppose + digit + op + digit = digit
+    if re.search(r'(?:if|suppose|assume)\s+\d+\s*[+\-*/]\s*\d+\s*=\s*\d+', user_input, re.I):
+        return True
+    return False
 
 
 def _l8_needs_verification(user_input: str, thinking_tokens: int) -> bool:
     """L8: Check if post-thinking verification cycle is needed.
 
-    Returns True if the question involves math/logic AND thinking was
-    suspiciously short (<100 tokens). Short thinking on complex questions
-    = high risk of Logic Sycophancy (model reverse-engineers conclusion
-    without verifying its own reasoning).
+    Two tiers:
+      - Counterfactual premise detected → ALWAYS verify (no token gate)
+      - Math/logic markers + short thinking (<100 tokens) → verify
     """
+    # Tier 1: Counterfactual = always verify
+    if _l8_is_counterfactual(user_input):
+        return True
+    # Tier 2: Math/logic + short thinking
     if thinking_tokens >= 100:
         return False
     _MARKERS = (
@@ -351,21 +381,15 @@ class MetisInference:
         # L8: Verification Cycle state — max 1 verification pass per generation
         verification_count = 0
 
-        # If thinking protocol enabled, inject <thinking> + scaffold into BOTH
-        # the output buffer AND the model's input, so the model actually knows
-        # it should generate thinking content.
+        # If thinking protocol enabled, <thinking> + scaffold are already in
+        # prompt_ids (injected at line 284-287 before tokenization).
+        # We only notify the visualizer callback here — do NOT add tokens to
+        # generated_tokens (line 1409 handles _split_thinking prepend) and
+        # do NOT modify input_ids (prompt_ids already has the tag).
         if use_thinking_protocol:
-            scaffold = _build_reasoning_scaffold(CoTStrategy.STANDARD, prompt)
-            think_open = f"<thinking>\n{scaffold}"
-            think_open_ids = tokenizer.encode(think_open, add_special_tokens=False)
-            for tid in think_open_ids:
-                generated_tokens.append(tid)
             if self._on_token is not None:
                 open_signal = CognitiveSignal(decision=Decision.DEEP, introspection="[Thinking Start]")
-                self._on_token(think_open, open_signal)
-            # Feed prompt + <thinking> + scaffold to model in one shot
-            think_tensor = torch.tensor([think_open_ids], device=model.device)
-            input_ids = torch.cat([prompt_ids, think_tensor], dim=1)
+                self._on_token("<thinking>\n", open_signal)
 
         # --- Token-by-token generation + METIS real-time monitoring ---
         for step in range(max_tokens):
@@ -775,6 +799,48 @@ class MetisInference:
                         logits = close_out.logits[:, -1, :]
                         is_thinking = False
 
+                        # L8: Verification Cycle (repetition-close path)
+                        _rep_think_count = step - thinking_start_step
+                        if verification_count == 0 and _l8_needs_verification(prompt, _rep_think_count):
+                            verification_count += 1
+                            _verify_open = (
+                                "\n<thinking>\n"
+                                "Wait — my previous reasoning may contain errors. "
+                                "Let me check: does the premise contradict a basic axiom? "
+                                "If so, what breaks?\n"
+                            )
+                            _verify_ids = tokenizer.encode(_verify_open, add_special_tokens=False)
+                            for tid in _verify_ids:
+                                generated_tokens.append(tid)
+                            if self._on_token is not None:
+                                self._on_token(
+                                    _verify_open,
+                                    CognitiveSignal(
+                                        decision=Decision.DEEP,
+                                        introspection="[Thinking: L8 verification (post-repetition)]",
+                                    ),
+                                )
+                            _verify_input = torch.tensor([_verify_ids], device=model.device)
+                            _verify_out = model(
+                                input_ids=_verify_input,
+                                past_key_values=past_key_values,
+                                use_cache=True,
+                                return_dict=True,
+                            )
+                            past_key_values = _verify_out.past_key_values
+                            logits = _verify_out.logits[:, -1, :]
+                            is_thinking = True
+                            thinking_start_step = step
+                            dynamic_thinking_budget = 128
+                            thinking_entropies.clear()
+                            thinking_decisions.clear()
+                            thinking_close_pending = False
+                            thinking_failed = False  # Reset: give verification a clean slate
+                            logger.info(
+                                f"[METIS] L8: Verification cycle injected after repetition-close "
+                                f"(original thinking was {_rep_think_count} tokens)"
+                            )
+
             # --- Token surprise: compute from RAW logits before sampling modifies them ---
             # -log2(p(token)) = prediction error in bits (neuroscience: surprise signal)
             with torch.no_grad():
@@ -1029,7 +1095,12 @@ class MetisInference:
                     _forced_think_count = step - thinking_start_step
                     if verification_count == 0 and _l8_needs_verification(prompt, _forced_think_count):
                         verification_count += 1
-                        _verify_open = "\n<thinking>\nWait, let me verify my reasoning step by step.\n"
+                        _verify_open = (
+                            "\n<thinking>\n"
+                            "Wait — my previous reasoning may contain errors. "
+                            "Let me check: does the premise contradict a basic axiom? "
+                            "If so, what breaks?\n"
+                        )
                         _verify_ids = tokenizer.encode(_verify_open, add_special_tokens=False)
                         for tid in _verify_ids:
                             generated_tokens.append(tid)
@@ -1258,7 +1329,12 @@ class MetisInference:
                         # L8: Verification Cycle (same as forced path)
                         if verification_count == 0 and _l8_needs_verification(prompt, tokens_in_block):
                             verification_count += 1
-                            _verify_open = "\n<thinking>\nWait, let me verify my reasoning step by step.\n"
+                            _verify_open = (
+                                "\n<thinking>\n"
+                                "Wait — my previous reasoning may contain errors. "
+                                "Let me check: does the premise contradict a basic axiom? "
+                                "If so, what breaks?\n"
+                            )
                             _verify_ids = tokenizer.encode(_verify_open, add_special_tokens=False)
                             for tid in _verify_ids:
                                 generated_tokens.append(tid)
@@ -1604,8 +1680,21 @@ class MetisInference:
         # Strip non-protocol tags: <answer>, <verify>, etc.
         answer = re.sub(r'</?answer>', '', answer)
         answer = re.sub(r'</?verify>', '', answer)
-        # L8 verification scaffold remnants
+        # L8 verification scaffold remnants (all versions)
         answer = re.sub(r'Wait,? let me verify my reasoning step by step\.?\n?', '', answer)
+        answer = re.sub(
+            r'Wait\s*[—–-]\s*my previous reasoning may contain errors\.?\s*'
+            r'Let me check:?\s*does the premise contradict a basic axiom\??\s*'
+            r'If so,?\s*what breaks\??\n?',
+            '', answer, flags=re.IGNORECASE,
+        )
+        # Anti-Sycophancy scaffold remnants
+        answer = re.sub(
+            r'WARNING:?\s*The premise may contradict standard axioms\.?\s*'
+            r'Do NOT try to make it work\.?\s*Instead,?\s*prove what breaks:?\s*'
+            r'derive a contradiction[^.\n]*\.?\n?',
+            '', answer, flags=re.IGNORECASE,
+        )
         # Strip MathML/XML garbage (incomplete blocks from force-stop)
         answer = re.sub(r'<math\b[^>]*>.*?</math>', '', answer, flags=re.DOTALL)
         answer = re.sub(r'<math\b[^>]*>[^<]*$', '', answer)  # unclosed <math>
