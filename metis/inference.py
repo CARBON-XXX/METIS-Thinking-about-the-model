@@ -45,6 +45,71 @@ from .cognitive.cot import CoTManager
 logger = logging.getLogger(__name__)
 
 
+# ═══════════════════════════════════════════════════════════
+# Reasoning Scaffold Templates
+# ═══════════════════════════════════════════════════════════
+# Problem: 1.5B models treat <thinking> as "answer area 2" — they dump
+# knowledge instead of reasoning. Fix: inject structured scaffolds that
+# force meta-cognitive operations BEFORE content generation.
+#
+# Design principles:
+#   1. Echo user input → forces model to re-examine the question
+#   2. Strategy-specific prompt → steers toward reasoning, not recitation
+#   3. Short (< 30 tokens) → doesn't waste thinking budget
+#   4. Ends mid-sentence → model must CONTINUE the reasoning, not start fresh
+
+def _build_reasoning_scaffold(
+    strategy: CoTStrategy,
+    user_input: str,
+    context: str = "",
+) -> str:
+    """
+    Build a structured reasoning scaffold for CoT injection.
+
+    Instead of bare <thinking>, this provides a cognitive template that
+    forces the model to analyze before generating. The scaffold ends
+    mid-sentence so the model must continue the reasoning chain.
+
+    Args:
+        strategy: CoT strategy (determines scaffold type)
+        user_input: Original user prompt (echoed back for re-examination)
+        context: Optional additional context (e.g., what was generated so far)
+
+    Returns:
+        Scaffold string to inject after <thinking> tag
+    """
+    # Truncate input for scaffold (don't waste thinking tokens on long prompts)
+    preview = user_input[:80].strip()
+    if len(user_input) > 80:
+        preview += "..."
+
+    if strategy == CoTStrategy.CLARIFICATION:
+        # Ambiguity/typo detection scaffold
+        return (
+            f'The user wrote: "{preview}"\n'
+            f'Let me check if there are typos, missing words, or ambiguity. '
+        )
+    elif strategy == CoTStrategy.DECOMPOSITION:
+        # Logical decomposition scaffold
+        return (
+            f'The question is: "{preview}"\n'
+            f'This requires step-by-step analysis.\n'
+            f'Step 1: '
+        )
+    elif strategy == CoTStrategy.REFLECTION:
+        # Self-correction scaffold
+        return (
+            f'Wait, let me re-read the question: "{preview}"\n'
+            f'What I said so far might be wrong because '
+        )
+    else:
+        # STANDARD: intent analysis scaffold
+        return (
+            f'The user asked: "{preview}"\n'
+            f'Before answering, let me analyze what they really want to know. '
+        )
+
+
 class MetisInference:
     """
     METIS Cognitive-aware Inference Pipeline
@@ -146,15 +211,19 @@ class MetisInference:
             messages = [{"role": "user", "content": prompt}]
             
             # ─── Magic Mod: Thinking Protocol System Prompt ───
+            # Anti-performative: explicitly forbid knowledge dumping in thinking.
+            # Force the model to do meta-cognitive work (intent analysis, error
+            # detection, decomposition) instead of "performing" reasoning.
             if use_thinking_protocol:
                 system_content = (
-                    "You are a deep thinking AI. Before answering, you must engage in a comprehensive, "
-                    "fluid stream-of-consciousness internal monologue inside <thinking>...</thinking> tags. "
-                    "Explore the problem from multiple angles, question your assumptions, and verify your logic step-by-step. "
-                    "Do not use bullet points for your thinking; instead, write in a natural, flowing narrative. "
-                    "Only when you have a solid conclusion should you close the thinking tag and output the final answer."
+                    "You are a careful reasoning AI. You think inside <thinking>...</thinking> tags before answering.\n"
+                    "CRITICAL RULES for your thinking:\n"
+                    "1. FIRST analyze what the user is really asking. Check for typos, ambiguity, or missing context.\n"
+                    "2. NEVER list facts or bullet points inside thinking. That belongs in the answer.\n"
+                    "3. Use thinking ONLY for: questioning assumptions, detecting errors, planning your response structure.\n"
+                    "4. Write in natural flowing narrative, not numbered lists.\n"
+                    "5. Keep thinking SHORT (2-4 sentences). Then give a thorough answer outside the tags."
                 )
-                # Check if messages already has system, if so prepend/replace, else insert
                 messages.insert(0, {"role": "system", "content": system_content})
 
             text = tokenizer.apply_chat_template(
@@ -163,11 +232,10 @@ class MetisInference:
         else:
             text = prompt
             
-        # Thinking Protocol injection (Force start)
+        # Thinking Protocol injection (Force start) + reasoning scaffold
         if use_thinking_protocol:
-            # Check if text already ends with assistant marker, append <thinking>
-            # Qwen/ChatML usually ends with "assistant\n"
-            text += "<thinking>\n"
+            scaffold = _build_reasoning_scaffold(CoTStrategy.STANDARD, prompt)
+            text += f"<thinking>\n{scaffold}"
 
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
         input_ids = inputs.input_ids
@@ -294,8 +362,10 @@ class MetisInference:
                         past_key_values = clean_out.past_key_values
                         logits = clean_out.logits[:, -1, :]
 
-                    # Open <thinking> tag at sentence boundary
-                    think_open = "\n<thinking>\n"
+                    # Open <thinking> tag + reasoning scaffold at sentence boundary
+                    # Scaffold forces meta-cognitive analysis before knowledge dumping
+                    scaffold = _build_reasoning_scaffold(strategy, prompt)
+                    think_open = f"\n<thinking>\n{scaffold}"
                     think_open_ids = tokenizer.encode(think_open, add_special_tokens=False)
                     for tid in think_open_ids:
                         generated_tokens.append(tid)
@@ -471,8 +541,9 @@ class MetisInference:
                         past_key_values = clean_out.past_key_values
                         logits = clean_out.logits[:, -1, :]
 
-                        # Inject <thinking> tag
-                        think_open = "\n<thinking>\n"
+                        # Inject <thinking> tag + REFLECTION scaffold (model is stuck)
+                        scaffold = _build_reasoning_scaffold(CoTStrategy.REFLECTION, prompt)
+                        think_open = f"\n<thinking>\n{scaffold}"
                         think_open_ids = tokenizer.encode(
                             think_open, add_special_tokens=False
                         )
