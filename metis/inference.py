@@ -120,61 +120,59 @@ def _build_reasoning_scaffold(
     has_draft = bool(draft_preview.strip())
 
     # ═══════════════════════════════════════════════════════
-    # MODE A: Critique Loop (has draft → "回头看" mechanism)
+    # MODE A: Critique Loop — "质疑" style (stream-of-consciousness)
     # ═══════════════════════════════════════════════════════
+    # v4: NO TEMPLATES. NO HEADERS. NO FORMS.
+    # Start with a direct challenge/doubt. The model must continue
+    # the thought, not fill out a checklist.
+    # The scaffold IS the first sentence of genuine thinking.
     if has_draft:
         if use_chinese:
-            # The triple-line structure forces:
-            #   Line 1: See original query (with potential typos/issues)
-            #   Line 2: See own draft (what was actually generated)
-            #   Line 3: Hook forces comparison → "我发现" = "I found that"
             if strategy == CoTStrategy.REFLECTION:
                 return (
-                    f'用户原文："{query_preview}"\n'
-                    f'我的草稿："{draft_preview}"\n'
-                    f'等等，回头看——草稿有误，因为'
+                    f'等等，我刚才写了"{draft_preview}"——'
+                    f'但用户说的是"{query_preview}"，这里有个问题：'
                 )
             else:
                 return (
-                    f'用户原文："{query_preview}"\n'
-                    f'我的草稿："{draft_preview}"\n'
-                    f'回头检查：草稿是否准确回应了用户的每个字？我发现'
+                    f'等等，用户说的是"{query_preview}"——'
+                    f'但我写了"{draft_preview}"，我是不是漏掉了什么？'
                 )
         else:
             if strategy == CoTStrategy.REFLECTION:
                 return (
-                    f'User query: "{query_preview}"\n'
-                    f'My draft: "{draft_preview}"\n'
-                    f'Wait — my draft may be wrong because '
+                    f'Wait — I wrote "{draft_preview}" '
+                    f'but the user said "{query_preview}". '
+                    f'Something is off: '
                 )
             else:
                 return (
-                    f'User query: "{query_preview}"\n'
-                    f'My draft: "{draft_preview}"\n'
-                    f'Double-check: does my draft address every word the user wrote? I notice '
+                    f'Wait — the user said "{query_preview}" '
+                    f'but my draft says "{draft_preview}". '
+                    f'Did I miss something? '
                 )
 
     # ═══════════════════════════════════════════════════════
-    # MODE B: Cold Start (no draft → echo input + hook)
+    # MODE B: Cold Start — challenge-first (no draft available)
     # ═══════════════════════════════════════════════════════
     if use_chinese:
         if strategy == CoTStrategy.CLARIFICATION:
-            return f'仔细审题："{query_preview}"\n这句话有个问题：'
+            return f'等等，"{query_preview}"——这句话哪里不对？'
         elif strategy == CoTStrategy.DECOMPOSITION:
-            return f'审题："{query_preview}"\n这个问题需要分步骤，首先'
+            return f'"{query_preview}"——这个问题比较复杂，先拆开看：'
         elif strategy == CoTStrategy.REFLECTION:
-            return f'等等，重新看："{query_preview}"\n之前的回答可能有误，因为'
+            return f'等等，重新看"{query_preview}"——我之前可能理解错了，因为'
         else:
-            return f'仔细审题："{query_preview}"\n我注意到'
+            return f'等等，"{query_preview}"——'
     else:
         if strategy == CoTStrategy.CLARIFICATION:
-            return f'Input: "{query_preview}"\nI notice a potential issue: '
+            return f'Wait — "{query_preview}" — what\'s off here? '
         elif strategy == CoTStrategy.DECOMPOSITION:
-            return f'Input: "{query_preview}"\nBreaking this down, first '
+            return f'"{query_preview}" — this needs breaking down: '
         elif strategy == CoTStrategy.REFLECTION:
-            return f'Wait, re-reading: "{query_preview}"\nMy previous response may be wrong because '
+            return f'Wait, re-reading "{query_preview}" — I may have misunderstood because '
         else:
-            return f'Input: "{query_preview}"\nI notice '
+            return f'Wait — "{query_preview}" — '
 
 
 class MetisInference:
