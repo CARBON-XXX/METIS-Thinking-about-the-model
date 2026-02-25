@@ -140,6 +140,25 @@ def _build_reasoning_scaffold(
         return f'"{q}"\n'
 
 
+def _l8_needs_verification(user_input: str, thinking_tokens: int) -> bool:
+    """L8: Check if post-thinking verification cycle is needed.
+
+    Returns True if the question involves math/logic AND thinking was
+    suspiciously short (<100 tokens). Short thinking on complex questions
+    = high risk of Logic Sycophancy (model reverse-engineers conclusion
+    without verifying its own reasoning).
+    """
+    if thinking_tokens >= 100:
+        return False
+    _MARKERS = (
+        '推导', '计算', '概率', '证明', '反证', '数学',
+        '逻辑', '公式', '方程', '等于', '坍塌',
+        'prove', 'derive', 'calculate', 'formula',
+        'logic', 'equation', 'probability',
+    )
+    return any(m in user_input for m in _MARKERS)
+
+
 class MetisInference:
     """
     METIS Cognitive-aware Inference Pipeline
@@ -329,15 +348,24 @@ class MetisInference:
         _COT_DEFER_MAX = 30  # Max tokens to wait for sentence boundary
         _SENTENCE_BREAKS = frozenset('\u3002\uff01\uff1f\n.!?\uff1a:')
 
-        # If thinking protocol enabled, write <thinking> tag to generated_tokens and notify callback
+        # L8: Verification Cycle state — max 1 verification pass per generation
+        verification_count = 0
+
+        # If thinking protocol enabled, inject <thinking> + scaffold into BOTH
+        # the output buffer AND the model's input, so the model actually knows
+        # it should generate thinking content.
         if use_thinking_protocol:
-            think_open = "<thinking>\n"
+            scaffold = _build_reasoning_scaffold(CoTStrategy.STANDARD, prompt)
+            think_open = f"<thinking>\n{scaffold}"
             think_open_ids = tokenizer.encode(think_open, add_special_tokens=False)
             for tid in think_open_ids:
                 generated_tokens.append(tid)
             if self._on_token is not None:
                 open_signal = CognitiveSignal(decision=Decision.DEEP, introspection="[Thinking Start]")
                 self._on_token(think_open, open_signal)
+            # Feed prompt + <thinking> + scaffold to model in one shot
+            think_tensor = torch.tensor([think_open_ids], device=model.device)
+            input_ids = torch.cat([prompt_ids, think_tensor], dim=1)
 
         # --- Token-by-token generation + METIS real-time monitoring ---
         for step in range(max_tokens):
@@ -995,6 +1023,56 @@ class MetisInference:
                     logits = rebuild_out.logits[:, -1, :]
                     logger.info("[METIS] L7: Full KV rebuild after forced thinking close")
 
+                    # L8: Verification Cycle — if thinking was too thin for a
+                    # math/logic question, inject a second thinking block for
+                    # self-consistency check. Prevents "Logic Sycophancy."
+                    _forced_think_count = step - thinking_start_step
+                    if verification_count == 0 and _l8_needs_verification(prompt, _forced_think_count):
+                        verification_count += 1
+                        _verify_open = "\n<thinking>\nWait, let me verify my reasoning step by step.\n"
+                        _verify_ids = tokenizer.encode(_verify_open, add_special_tokens=False)
+                        for tid in _verify_ids:
+                            generated_tokens.append(tid)
+                        if self._on_token is not None:
+                            self._on_token(
+                                _verify_open,
+                                CognitiveSignal(
+                                    decision=Decision.DEEP,
+                                    introspection="[Thinking: L8 verification]",
+                                ),
+                            )
+                        _verify_input = torch.tensor([_verify_ids], device=model.device)
+                        _verify_out = model(
+                            input_ids=_verify_input,
+                            past_key_values=past_key_values,
+                            use_cache=True,
+                            return_dict=True,
+                        )
+                        past_key_values = _verify_out.past_key_values
+                        logits = _verify_out.logits[:, -1, :]
+                        is_thinking = True
+                        thinking_start_step = step
+                        dynamic_thinking_budget = 128
+                        thinking_entropies.clear()
+                        thinking_decisions.clear()
+                        thinking_close_pending = False
+                        logger.info(
+                            f"[METIS] L8: Verification cycle injected "
+                            f"(original thinking was {_forced_think_count} tokens)"
+                        )
+                        # Re-sample first verification token and re-enter loop
+                        next_token_id = self._cognitive_sample(
+                            logits, signal, temperature, top_p, generated_tokens
+                        )
+                        generated_tokens.append(next_token_id)
+                        if self._on_token is not None and next_token_id != tokenizer.eos_token_id:
+                            token_text = tokenizer.decode([next_token_id], skip_special_tokens=True)
+                            vis_buffer.append((token_text, signal))
+                        if next_token_id == tokenizer.eos_token_id:
+                            break
+                        input_ids = torch.tensor([[next_token_id]], device=model.device)
+                        continue
+
                     # Re-sample from rebuilt logits for the answer
                     next_token_id = self._cognitive_sample(
                         logits, signal, temperature, top_p, generated_tokens
@@ -1176,6 +1254,52 @@ class MetisInference:
                         past_key_values = rebuild_out.past_key_values
                         logits = rebuild_out.logits[:, -1, :]
                         logger.info("[METIS] L7: Full KV rebuild after natural thinking close")
+
+                        # L8: Verification Cycle (same as forced path)
+                        if verification_count == 0 and _l8_needs_verification(prompt, tokens_in_block):
+                            verification_count += 1
+                            _verify_open = "\n<thinking>\nWait, let me verify my reasoning step by step.\n"
+                            _verify_ids = tokenizer.encode(_verify_open, add_special_tokens=False)
+                            for tid in _verify_ids:
+                                generated_tokens.append(tid)
+                            if self._on_token is not None:
+                                self._on_token(
+                                    _verify_open,
+                                    CognitiveSignal(
+                                        decision=Decision.DEEP,
+                                        introspection="[Thinking: L8 verification]",
+                                    ),
+                                )
+                            _verify_input = torch.tensor([_verify_ids], device=model.device)
+                            _verify_out = model(
+                                input_ids=_verify_input,
+                                past_key_values=past_key_values,
+                                use_cache=True,
+                                return_dict=True,
+                            )
+                            past_key_values = _verify_out.past_key_values
+                            logits = _verify_out.logits[:, -1, :]
+                            is_thinking = True
+                            thinking_start_step = step
+                            dynamic_thinking_budget = 128
+                            thinking_entropies.clear()
+                            thinking_decisions.clear()
+                            thinking_close_pending = False
+                            logger.info(
+                                f"[METIS] L8: Verification cycle injected "
+                                f"(original thinking was {tokens_in_block} tokens)"
+                            )
+                            next_token_id = self._cognitive_sample(
+                                logits, signal, temperature, top_p, generated_tokens
+                            )
+                            generated_tokens.append(next_token_id)
+                            if self._on_token is not None and next_token_id != tokenizer.eos_token_id:
+                                token_text = tokenizer.decode([next_token_id], skip_special_tokens=True)
+                                vis_buffer.append((token_text, signal))
+                            if next_token_id == tokenizer.eos_token_id:
+                                break
+                            input_ids = torch.tensor([[next_token_id]], device=model.device)
+                            continue
 
                         # Re-sample fresh answer token
                         next_token_id = self._cognitive_sample(
@@ -1477,6 +1601,11 @@ class MetisInference:
         answer = re.sub(r'"[^"]{0,150}"\n→\s*[^\n]{0,100}\n?', '', answer)
         # v5 fallback: query-only format
         answer = re.sub(r'^"[^"]{0,150}"\n', '', answer)
+        # Strip non-protocol tags: <answer>, <verify>, etc.
+        answer = re.sub(r'</?answer>', '', answer)
+        answer = re.sub(r'</?verify>', '', answer)
+        # L8 verification scaffold remnants
+        answer = re.sub(r'Wait,? let me verify my reasoning step by step\.?\n?', '', answer)
         # Strip MathML/XML garbage (incomplete blocks from force-stop)
         answer = re.sub(r'<math\b[^>]*>.*?</math>', '', answer, flags=re.DOTALL)
         answer = re.sub(r'<math\b[^>]*>[^<]*$', '', answer)  # unclosed <math>
