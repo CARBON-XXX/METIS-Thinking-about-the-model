@@ -73,55 +73,108 @@ def _has_cjk(text: str) -> bool:
 def _build_reasoning_scaffold(
     strategy: CoTStrategy,
     user_input: str,
-    context: str = "",
+    draft_text: str = "",
 ) -> str:
     """
     Build a language-adaptive reasoning scaffold for CoT injection.
 
-    Key design (v2 — "按头小分队"):
-      1. Same language as user input (Chinese scaffold for CJK, English otherwise)
-      2. Echo FULL input in quotes (critical for catching trailing typos)
-      3. End with a strong auto-regressive hook ("我注意到" / "I notice")
-         that FORCES the model to identify something before knowledge dumping
-      4. Ultra-short (< 15 tokens) — don't waste thinking budget
+    v3 — "Reflective Feedback Loop" (反思回环):
+
+    Two modes:
+      A. CRITIQUE mode (when draft_text is provided):
+         Feed BOTH original query AND model's own draft back to itself,
+         forcing a "double-take" — the model MUST compare what it wrote
+         against what the user actually asked.
+         This is the core mechanism that turns <thinking> from "recitation
+         space" into "genuine analysis space".
+
+      B. COLD START mode (no draft — e.g., think=ON from beginning):
+         Same as v2: echo input + strong auto-regressive hook.
+
+    Design constraints:
+      - Same language as user input (CJK detection)
+      - Draft preview capped at 60 chars (enough to trigger comparison,
+        not enough to become the answer itself)
+      - Hook ends with colon/open phrase → forces model to complete it
+        with analysis, not knowledge
 
     Args:
-        strategy: CoT strategy (determines scaffold type)
-        user_input: Original user prompt (echoed back for re-examination)
-        context: Optional additional context (e.g., what was generated so far)
+        strategy: CoT strategy (determines scaffold flavor)
+        user_input: Original user prompt
+        draft_text: Model's draft output so far (triggers Critique mode)
 
     Returns:
         Scaffold string to inject after <thinking> tag
     """
-    # Echo full input up to 120 chars (longer than before — must catch trailing chars)
-    preview = user_input[:120].strip()
+    # Echo full input up to 120 chars
+    query_preview = user_input[:120].strip()
     if len(user_input) > 120:
-        preview += "..."
+        query_preview += "..."
+
+    # Draft preview: short enough to trigger comparison, not a full copy
+    draft_preview = draft_text.strip()[:60]
+    if len(draft_text.strip()) > 60:
+        draft_preview += "..."
 
     use_chinese = _has_cjk(user_input)
+    has_draft = bool(draft_preview.strip())
 
+    # ═══════════════════════════════════════════════════════
+    # MODE A: Critique Loop (has draft → "回头看" mechanism)
+    # ═══════════════════════════════════════════════════════
+    if has_draft:
+        if use_chinese:
+            # The triple-line structure forces:
+            #   Line 1: See original query (with potential typos/issues)
+            #   Line 2: See own draft (what was actually generated)
+            #   Line 3: Hook forces comparison → "我发现" = "I found that"
+            if strategy == CoTStrategy.REFLECTION:
+                return (
+                    f'用户原文："{query_preview}"\n'
+                    f'我的草稿："{draft_preview}"\n'
+                    f'等等，回头看——草稿有误，因为'
+                )
+            else:
+                return (
+                    f'用户原文："{query_preview}"\n'
+                    f'我的草稿："{draft_preview}"\n'
+                    f'回头检查：草稿是否准确回应了用户的每个字？我发现'
+                )
+        else:
+            if strategy == CoTStrategy.REFLECTION:
+                return (
+                    f'User query: "{query_preview}"\n'
+                    f'My draft: "{draft_preview}"\n'
+                    f'Wait — my draft may be wrong because '
+                )
+            else:
+                return (
+                    f'User query: "{query_preview}"\n'
+                    f'My draft: "{draft_preview}"\n'
+                    f'Double-check: does my draft address every word the user wrote? I notice '
+                )
+
+    # ═══════════════════════════════════════════════════════
+    # MODE B: Cold Start (no draft → echo input + hook)
+    # ═══════════════════════════════════════════════════════
     if use_chinese:
-        # ── Chinese scaffolds ──
-        # "我注意到" = "I notice that" — model MUST say what it noticed
         if strategy == CoTStrategy.CLARIFICATION:
-            return f'仔细审题："{preview}"\n这句话有个问题：'
+            return f'仔细审题："{query_preview}"\n这句话有个问题：'
         elif strategy == CoTStrategy.DECOMPOSITION:
-            return f'审题："{preview}"\n这个问题需要分步骤，首先'
+            return f'审题："{query_preview}"\n这个问题需要分步骤，首先'
         elif strategy == CoTStrategy.REFLECTION:
-            return f'等等，重新看："{preview}"\n之前的回答可能有误，因为'
+            return f'等等，重新看："{query_preview}"\n之前的回答可能有误，因为'
         else:
-            # STANDARD — strongest general-purpose hook
-            return f'仔细审题："{preview}"\n我注意到'
+            return f'仔细审题："{query_preview}"\n我注意到'
     else:
-        # ── English scaffolds ──
         if strategy == CoTStrategy.CLARIFICATION:
-            return f'Input: "{preview}"\nI notice a potential issue: '
+            return f'Input: "{query_preview}"\nI notice a potential issue: '
         elif strategy == CoTStrategy.DECOMPOSITION:
-            return f'Input: "{preview}"\nBreaking this down, first '
+            return f'Input: "{query_preview}"\nBreaking this down, first '
         elif strategy == CoTStrategy.REFLECTION:
-            return f'Wait, re-reading: "{preview}"\nMy previous response may be wrong because '
+            return f'Wait, re-reading: "{query_preview}"\nMy previous response may be wrong because '
         else:
-            return f'Input: "{preview}"\nI notice '
+            return f'Input: "{query_preview}"\nI notice '
 
 
 class MetisInference:
@@ -231,12 +284,12 @@ class MetisInference:
             if use_thinking_protocol:
                 system_content = (
                     "You are a careful reasoning AI. You think inside <thinking>...</thinking> tags before answering.\n"
-                    "CRITICAL RULES for your thinking:\n"
-                    "1. FIRST analyze what the user is really asking. Check for typos, ambiguity, or missing context.\n"
-                    "2. NEVER list facts or bullet points inside thinking. That belongs in the answer.\n"
-                    "3. Use thinking ONLY for: questioning assumptions, detecting errors, planning your response structure.\n"
-                    "4. Write in natural flowing narrative, not numbered lists.\n"
-                    "5. Keep thinking SHORT (2-4 sentences). Then give a thorough answer outside the tags."
+                    "THINKING RULES:\n"
+                    "1. If you see your own draft in the thinking block, COMPARE it word-by-word against the user's query.\n"
+                    "2. Check for: typos in the query, things your draft missed, wrong assumptions.\n"
+                    "3. NEVER dump knowledge or list facts inside thinking. That goes in the answer.\n"
+                    "4. Thinking = critique and verify. Answer = inform and explain.\n"
+                    "5. Keep thinking to 2-4 sentences, then answer thoroughly."
                 )
                 messages.insert(0, {"role": "system", "content": system_content})
 
@@ -387,9 +440,12 @@ class MetisInference:
                         past_key_values = clean_out.past_key_values
                         logits = clean_out.logits[:, -1, :]
 
-                    # Open <thinking> tag + reasoning scaffold at sentence boundary
-                    # Scaffold forces meta-cognitive analysis before knowledge dumping
-                    scaffold = _build_reasoning_scaffold(strategy, prompt)
+                    # Open <thinking> tag + Critique Loop scaffold
+                    # Extract draft text so model can "look back" at its own output
+                    _draft = tokenizer.decode(
+                        generated_tokens, skip_special_tokens=True
+                    ).strip() if generated_tokens else ""
+                    scaffold = _build_reasoning_scaffold(strategy, prompt, draft_text=_draft)
                     think_open = f"\n<thinking>\n{scaffold}"
                     think_open_ids = tokenizer.encode(think_open, add_special_tokens=False)
                     for tid in think_open_ids:
@@ -581,8 +637,13 @@ class MetisInference:
                         past_key_values = clean_out.past_key_values
                         logits = clean_out.logits[:, -1, :]
 
-                        # Inject <thinking> tag + REFLECTION scaffold (model is stuck)
-                        scaffold = _build_reasoning_scaffold(CoTStrategy.REFLECTION, prompt)
+                        # Inject <thinking> tag + Critique Loop scaffold (model is stuck)
+                        _draft = tokenizer.decode(
+                            generated_tokens, skip_special_tokens=True
+                        ).strip() if generated_tokens else ""
+                        scaffold = _build_reasoning_scaffold(
+                            CoTStrategy.REFLECTION, prompt, draft_text=_draft
+                        )
                         think_open = f"\n<thinking>\n{scaffold}"
                         think_open_ids = tokenizer.encode(
                             think_open, add_special_tokens=False
