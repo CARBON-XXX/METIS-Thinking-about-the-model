@@ -775,6 +775,26 @@ class MetisInference:
                 thinking_entropies.append(signal.semantic_entropy)
                 thinking_decisions.append(signal.decision)
 
+                # L1.5: Markup Detector — catch MathML/XML/HTML generation
+                # in thinking blocks. XML is formatting, not reasoning.
+                _MARKUP_CHECK_WINDOW = 16
+                should_truncate_markup = False
+                if tokens_in_block >= 8 and len(generated_tokens) >= _MARKUP_CHECK_WINDOW:
+                    _recent_text = tokenizer.decode(
+                        generated_tokens[-_MARKUP_CHECK_WINDOW:],
+                        skip_special_tokens=True,
+                    )
+                    _MARKUP_PATTERNS = ('<math', 'xmlns=', '<mn>', '<mo>', '<mrow',
+                                        '<mfrac', '<msup', '<annotation', 'MathML')
+                    _markup_hits = sum(1 for p in _MARKUP_PATTERNS if p in _recent_text)
+                    if _markup_hits >= 2:
+                        should_truncate_markup = True
+                        logger.info(
+                            f"[METIS] Markup detected in thinking at step {step}: "
+                            f"{_markup_hits} XML patterns found "
+                            f"→ force-closing (XML ≠ reasoning)"
+                        )
+
                 # L1: Recitation Detector — sliding window check
                 # Skip first _RECITATION_MIN_TOKENS to let scaffold take effect
                 should_truncate_recitation = False
@@ -789,6 +809,7 @@ class MetisInference:
                         1 for d in window_d if d == Decision.FAST
                     ) / len(window_d)
 
+                    # Path A: Classic recitation (low entropy + FAST mode)
                     if avg_h < _RECITATION_ENTROPY_CEIL and fast_ratio >= _RECITATION_FAST_RATIO:
                         should_truncate_recitation = True
                         logger.info(
@@ -796,6 +817,16 @@ class MetisInference:
                             f"avg_H={avg_h:.3f} < {_RECITATION_ENTROPY_CEIL}, "
                             f"FAST={fast_ratio:.0%} >= {_RECITATION_FAST_RATIO:.0%} "
                             f"→ force-closing thinking (you're reciting, not reasoning)"
+                        )
+                    # Path B: Entropy-only fast path — catches MathML/XML recitation
+                    # where decision=NORMAL but entropy≈0 (structured markup output)
+                    _ENTROPY_FLOOR = 0.1  # 3x below normal ceiling
+                    if not should_truncate_recitation and avg_h < _ENTROPY_FLOOR:
+                        should_truncate_recitation = True
+                        logger.info(
+                            f"[METIS] Ultra-low entropy detected at step {step}: "
+                            f"avg_H={avg_h:.3f} < {_ENTROPY_FLOOR} "
+                            f"→ force-closing thinking (deterministic output ≠ reasoning)"
                         )
 
                 # L2: Dynamic budget exhaustion
@@ -809,8 +840,9 @@ class MetisInference:
                     )
 
                 # Graceful close: wait for sentence boundary (max grace tokens)
-                _CLOSE_GRACE = 15
-                if should_truncate_recitation or should_truncate_budget:
+                # Markup gets 0 grace — XML is garbage, not a sentence to finish
+                _CLOSE_GRACE = 0 if should_truncate_markup else 15
+                if should_truncate_recitation or should_truncate_budget or should_truncate_markup:
                     if not thinking_close_pending:
                         thinking_close_pending = True
                         thinking_close_since = step
@@ -928,7 +960,57 @@ class MetisInference:
                 recent_ids = generated_tokens[-check_window:] + [next_token_id]
                 recent_text = tokenizer.decode(recent_ids, skip_special_tokens=True)
 
-                if "</thinking>" in recent_text:
+                if "<thinking>" in recent_text and "</thinking>" not in recent_text:
+                    # --- Anti-Recursion: suppress <thinking> inside thinking ---
+                    # Model sometimes regenerates the scaffold pattern inside
+                    # a thinking block (recursive nesting). Strip it.
+                    logger.info(
+                        f"[METIS] Anti-Recursion: Suppressed nested <thinking> "
+                        f"at step {step}"
+                    )
+                    _opening_partials = [
+                        "<thinking>", "<thinking", "<thinkin", "<thinki",
+                        "<think", "<thin", "<thi",
+                    ]
+                    while generated_tokens:
+                        tail = tokenizer.decode(
+                            generated_tokens[-6:], skip_special_tokens=True
+                        )
+                        if any(tail.rstrip().endswith(p) for p in _opening_partials):
+                            generated_tokens.pop()
+                        else:
+                            break
+                    vis_buffer.clear()
+
+                    if generated_tokens:
+                        gen_ids = torch.tensor(
+                            [generated_tokens], device=model.device
+                        )
+                        full_input = torch.cat(
+                            [prompt_ids, gen_ids], dim=1
+                        )
+                    else:
+                        full_input = prompt_ids
+                    clean_out = model(
+                        input_ids=full_input,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                    past_key_values = clean_out.past_key_values
+                    logits = clean_out.logits[:, -1, :]
+
+                    open_tag_ids = tokenizer.encode(
+                        "<thinking>", add_special_tokens=False
+                    )
+                    if open_tag_ids:
+                        logits[0, open_tag_ids[0]] = float('-inf')
+
+                    next_token_id = self._cognitive_sample(
+                        logits, signal, temperature, top_p, generated_tokens
+                    )
+                    # Fall through to normal append below
+
+                elif "</thinking>" in recent_text:
                     tokens_in_block = step - thinking_start_step
                     if tokens_in_block < min_thinking_tokens:
                         logger.info(
@@ -986,6 +1068,7 @@ class MetisInference:
                         )
 
                         # Fall through to normal append below
+
                     else:
                         # Thinking block closed naturally
                         is_thinking = False
@@ -1343,6 +1426,11 @@ class MetisInference:
         answer = re.sub(r'"[^"]{0,150}"\n→\s*[^\n]{0,100}\n?', '', answer)
         # v5 fallback: query-only format
         answer = re.sub(r'^"[^"]{0,150}"\n', '', answer)
+        # Strip MathML/XML garbage (incomplete blocks from force-stop)
+        answer = re.sub(r'<math\b[^>]*>.*?</math>', '', answer, flags=re.DOTALL)
+        answer = re.sub(r'<math\b[^>]*>[^<]*$', '', answer)  # unclosed <math>
+        answer = re.sub(r'<(?:mn|mo|mrow|mfrac|msup|msub|mtext|annotation)\b[^>]*>.*?</(?:mn|mo|mrow|mfrac|msup|msub|mtext|annotation)>', '', answer, flags=re.DOTALL)
+        answer = re.sub(r'</?(?:mn|mo|mrow|mfrac|msup|msub|mtext|math|annotation)\b[^>]*/?>', '', answer)
         # Clean up excess whitespace left behind
         answer = re.sub(r'\n{3,}', '\n\n', answer).strip()
 
