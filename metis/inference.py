@@ -355,6 +355,16 @@ class MetisInference:
         thinking_close_pending = False
         thinking_close_since = -1
 
+        # L9: Entropy Floor — break out of greedy traps inside thinking.
+        # When H stays near 0 for too many consecutive steps, the model is
+        # locked in a local probability maximum (deterministic output ≠ reasoning).
+        # Temporarily boost temperature to inject exploration noise.
+        _GREEDY_H_CEIL = 0.05       # Below this = effectively greedy decoding
+        _GREEDY_CONSEC_TRIGGER = 6  # Consecutive zero-entropy steps before intervention
+        _GREEDY_TEMP_BOOST = 0.3    # Added to base temperature during intervention
+        greedy_consec_count = 0     # Running counter of consecutive near-zero H
+        greedy_temp_active = False   # Whether temp boost is currently applied
+
         # L6: Backtracking — roll back System 1 draft after System 2 thinking
         # When thinking closes, delete the erroneous draft tokens that preceded
         # the thinking block, and regenerate from the last clean sentence boundary.
@@ -367,8 +377,8 @@ class MetisInference:
         # Repetition detection state
         repetition_events = 0
         thinking_failed = False    # Set True when thinking was closed due to repetition
-        _REP_CHECK_INTERVAL = 5    # Check every N steps (saves compute + reduces false positives)
-        _REP_CHECK_START = 40      # Start after enough tokens for meaningful detection
+        _REP_CHECK_INTERVAL = 2    # Check every N steps (was 5; reduced for faster intervention)
+        _REP_CHECK_START = 20      # Start after enough tokens (was 40; reduced to catch early loops)
         _REP_FORCE_STOP = 3        # Force stop after N repetition events
 
         # Deferred CoT injection state: wait for sentence boundary
@@ -568,7 +578,11 @@ class MetisInference:
                 )
 
             if signal.boundary_action == BoundaryAction.HEDGE:
-                boundary_interventions += 1
+                # Suppress HEDGE counting during thinking: semantic ambiguity
+                # is EXPECTED when exploring counterfactual premises. Counting
+                # it as intervention forces model into safe/repetitive phrasing.
+                if not is_thinking:
+                    boundary_interventions += 1
 
             # --- G5: Repetition Loop Detection & Intervention ---
             # Detects when model is stuck repeating the same token sequence.
@@ -626,6 +640,8 @@ class MetisInference:
                                     ),
                                 )
                             is_thinking = False
+                            greedy_consec_count = 0
+                            greedy_temp_active = False
                         break
 
                     if thinking_failed and not is_thinking:
@@ -798,6 +814,8 @@ class MetisInference:
                         past_key_values = close_out.past_key_values
                         logits = close_out.logits[:, -1, :]
                         is_thinking = False
+                        greedy_consec_count = 0
+                        greedy_temp_active = False
 
                         # L8: Verification Cycle (repetition-close path)
                         _rep_think_count = step - thinking_start_step
@@ -847,8 +865,10 @@ class MetisInference:
                 _log_probs = F.log_softmax(logits.float(), dim=-1)
 
             # --- Token sampling (cognitive-aware) ---
+            # L9: Apply temp boost if in greedy trap (thinking block only)
+            _effective_temp = temperature + _GREEDY_TEMP_BOOST if greedy_temp_active else temperature
             next_token_id = self._cognitive_sample(
-                logits, signal, temperature, top_p, generated_tokens
+                logits, signal, _effective_temp, top_p, generated_tokens
             )
 
             # Attach surprise to signal (after sampling, we know which token was chosen)
@@ -868,6 +888,22 @@ class MetisInference:
                 # Track entropy/decisions inside thinking block
                 thinking_entropies.append(signal.semantic_entropy)
                 thinking_decisions.append(signal.decision)
+
+                # L9: Entropy Floor — detect and break greedy traps
+                if signal.semantic_entropy < _GREEDY_H_CEIL:
+                    greedy_consec_count += 1
+                    if greedy_consec_count >= _GREEDY_CONSEC_TRIGGER and not greedy_temp_active:
+                        greedy_temp_active = True
+                        logger.info(
+                            f"[METIS] L9: Greedy trap at step {step} "
+                            f"(H<{_GREEDY_H_CEIL} for {greedy_consec_count} consecutive steps) "
+                            f"→ temp boost +{_GREEDY_TEMP_BOOST}"
+                        )
+                else:
+                    if greedy_temp_active:
+                        logger.info(f"[METIS] L9: Entropy recovered at step {step}, temp boost off")
+                    greedy_consec_count = 0
+                    greedy_temp_active = False
 
                 # Detect math reasoning content in recent tokens (shared by L1/L1.5)
                 # Math derivation has naturally low entropy — don't kill it
@@ -1049,6 +1085,8 @@ class MetisInference:
 
                     is_thinking = False
                     thinking_close_pending = False
+                    greedy_consec_count = 0
+                    greedy_temp_active = False
                     # Flush buffered thinking tokens
                     if vis_buffer:
                         for t, s in vis_buffer:
@@ -1284,6 +1322,8 @@ class MetisInference:
                         # Thinking block closed naturally
                         is_thinking = False
                         thinking_close_pending = False
+                        greedy_consec_count = 0
+                        greedy_temp_active = False
                         if vis_buffer:
                             for t, s in vis_buffer:
                                 if self._on_token:
