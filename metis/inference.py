@@ -115,10 +115,11 @@ def _build_reasoning_scaffold(
 
     if d:
         # MODE A: Critique — bare facts, zero style
-        return f'[Q: "{q}" | D: "{d}"]\n'
+        # "query" vs "draft" — minimal, no markup, no labels
+        return f'"{q}" vs "{d}"\n'
     else:
         # MODE B: Cold Start — query only
-        return f'[Q: "{q}"]\n'
+        return f'"{q}"\n'
 
 
 class MetisInference:
@@ -989,8 +990,13 @@ class MetisInference:
             thinking_tokens = generated_tokens[cot_inject_token_idx:]
             raw_text = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
             thinking_text = tokenizer.decode(thinking_tokens, skip_special_tokens=True)
-            # Clean any stray tags from the answer portion
-            raw_text = re.sub(r'</?thinking[^>]*>', '', raw_text).strip()
+            # Clean any stray tags and scaffold remnants from the answer
+            raw_text = re.sub(r'</?thinking[^>]*>', '', raw_text)
+            # Strip scaffold patterns: "..." vs "...", [Q: ...], [D: ...]
+            raw_text = re.sub(r'\[Q:.*?\]', '', raw_text)
+            raw_text = re.sub(r'\[D:.*?\]', '', raw_text)
+            raw_text = re.sub(r'"[^"]{0,120}"\s*vs\s*"[^"]{0,80}"', '', raw_text)
+            raw_text = raw_text.strip()
         else:
             # think=ON from start, or no thinking: use regex splitting
             full_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
@@ -1173,6 +1179,10 @@ class MetisInference:
         # Remove incomplete tags: <thinking (no >) or </thinking (no >)
         # Complete tags already removed above, so only fragments remain
         answer = re.sub(r'</?thinking\b[^>]*', '', answer)
+        # Strip scaffold remnants: "..." vs "...", [Q: ...], [D: ...]
+        answer = re.sub(r'\[Q:.*?\]', '', answer)
+        answer = re.sub(r'\[D:.*?\]', '', answer)
+        answer = re.sub(r'"[^"]{0,120}"\s*vs\s*"[^"]{0,80}"', '', answer)
         # Clean up excess whitespace left behind
         answer = re.sub(r'\n{3,}', '\n\n', answer).strip()
 
