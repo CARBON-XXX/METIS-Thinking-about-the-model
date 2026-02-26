@@ -30,29 +30,29 @@ class C:
 @dataclass
 class ExperimentConfig:
     """Full experiment configuration."""
-    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    model_name: str = "Qwen/Qwen2.5-72B-Instruct"
     device: str = "auto"
     output_dir: str = "./experiment_output"
 
     # Generation
-    n_samples_per_prompt: int = 8       # More samples = better pair selection
-    max_new_tokens: int = 512
+    n_samples_per_prompt: int = 16      # DGX: more samples = better pair selection
+    max_new_tokens: int = 1024
     temperature: float = 0.7
 
     # Training
     dpo_epochs: int = 3
     dpo_learning_rate: float = 1e-6     # Moderate: enough signal to cross KL barrier
-    dpo_batch_size: int = 2              # Effective batch = 16 with accum=8
+    dpo_batch_size: int = 8              # DGX: large batch, effective = batch * accum = 32
     dpo_beta: float = 0.1               # Lower beta = more freedom to deviate from ref model
-    dpo_max_length: int = 768
-    gradient_checkpointing: bool = True
-    dpo_gradient_accumulation: int = 8   # Effective batch = 8
-    lora_r: int = 16
-    lora_alpha: int = 32
+    dpo_max_length: int = 2048           # DGX: full context window
+    gradient_checkpointing: bool = False  # DGX 128GB: no need to trade compute for memory
+    dpo_gradient_accumulation: int = 4   # Effective batch = 32
+    lora_r: int = 64                     # DGX: high-rank LoRA for 70B+ models
+    lora_alpha: int = 128
     lora_dropout: float = 0.05
 
     # Evaluation
-    eval_max_tokens: int = 512
+    eval_max_tokens: int = 1024
     eval_temperature: float = 0.7        # Match generation temp to prevent base model degeneration
 
     # Prompts

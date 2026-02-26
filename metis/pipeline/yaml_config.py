@@ -2,7 +2,7 @@
 METIS Pipeline — YAML Configuration System
 
 Replaces hardcoded dataclass defaults with YAML files for easy management
-of different experiment profiles (0.5B dev, 1.5B staging, 70B production).
+of different experiment profiles (1.5B dev, 7B staging, 72B production).
 
 Usage:
     from metis.pipeline.yaml_config import load_config, save_config
@@ -17,9 +17,9 @@ Usage:
     config = load_config("configs/base.yaml", overrides={"model_name": "meta-llama/..."})
 
 Preset profiles:
-    configs/dev.yaml      — 0.5B model, 20 prompts, fast iteration
-    configs/staging.yaml  — 1.5B model, 100 prompts, validation
-    configs/prod.yaml     — 70B model, 300 prompts, full experiment
+    configs/dev.yaml      — 1.5B model, 20 prompts, fast iteration
+    configs/staging.yaml  — 7B model, 100 prompts, validation
+    configs/prod.yaml     — 72B model, 300 prompts, full experiment
 """
 from __future__ import annotations
 
@@ -130,56 +130,68 @@ def save_config(config: Any, path: Union[str, Path]) -> None:
 
 _PRESETS: Dict[str, Dict[str, Any]] = {
     "dev": {
-        "model_name": "Qwen/Qwen2.5-0.5B-Instruct",
+        "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
         "n_train_prompts": 20,
         "n_eval_prompts": 10,
         "n_samples_per_prompt": 4,
-        "max_new_tokens": 256,
+        "max_new_tokens": 512,
         "dpo_epochs": 1,
+        "dpo_batch_size": 4,
+        "lora_r": 16,
+        "lora_alpha": 32,
         "run_benchmarks": False,
         "truthfulqa_questions": 50,
         "mmlu_subjects": 3,
         "mmlu_per_subject": 10,
     },
     "staging": {
-        "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
+        "model_name": "Qwen/Qwen2.5-7B-Instruct",
         "n_train_prompts": 100,
         "n_eval_prompts": 30,
         "n_samples_per_prompt": 8,
-        "max_new_tokens": 512,
+        "max_new_tokens": 1024,
         "dpo_epochs": 3,
+        "dpo_batch_size": 8,
+        "lora_r": 32,
+        "lora_alpha": 64,
         "run_benchmarks": True,
         "truthfulqa_questions": 100,
         "mmlu_subjects": 5,
         "mmlu_per_subject": 20,
     },
     "prod": {
-        "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
-        "n_train_prompts": 300,
-        "n_eval_prompts": 50,
-        "n_samples_per_prompt": 8,
-        "max_new_tokens": 512,
-        "dpo_epochs": 3,
-        "run_benchmarks": True,
-        "truthfulqa_questions": 200,
-        "mmlu_subjects": 10,
-        "mmlu_per_subject": 30,
-    },
-    "dgx_70b": {
         "model_name": "Qwen/Qwen2.5-72B-Instruct",
         "n_train_prompts": 300,
         "n_eval_prompts": 50,
         "n_samples_per_prompt": 16,
         "max_new_tokens": 1024,
         "dpo_epochs": 3,
-        "dpo_batch_size": 4,
+        "dpo_batch_size": 8,
         "dpo_gradient_accumulation": 4,
-        "lora_r": 32,
-        "lora_alpha": 64,
+        "lora_r": 64,
+        "lora_alpha": 128,
         "run_benchmarks": True,
         "truthfulqa_questions": 200,
         "mmlu_subjects": 10,
         "mmlu_per_subject": 30,
+    },
+    "dgx_full": {
+        "model_name": "Qwen/Qwen2.5-72B-Instruct",
+        "n_train_prompts": 500,
+        "n_eval_prompts": 100,
+        "n_samples_per_prompt": 32,
+        "max_new_tokens": 2048,
+        "dpo_epochs": 5,
+        "dpo_batch_size": 16,
+        "dpo_gradient_accumulation": 2,
+        "dpo_max_length": 4096,
+        "lora_r": 128,
+        "lora_alpha": 256,
+        "gradient_checkpointing": False,
+        "run_benchmarks": True,
+        "truthfulqa_questions": 400,
+        "mmlu_subjects": 20,
+        "mmlu_per_subject": 50,
     },
 }
 

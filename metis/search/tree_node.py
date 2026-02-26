@@ -6,12 +6,11 @@ Stores token sequence, KV cache snapshot, and METIS cognitive signals
 for efficient branching and backtracking.
 
 Memory model:
-    KV cache is the dominant memory consumer. For a 1.5B model with
-    32 layers × 2 (K+V) × hidden_dim × seq_len × fp16:
-    ~2MB per 100 tokens per node.
+    KV cache is the dominant memory consumer. For a 72B model with
+    80 layers × 2 (K+V) × hidden_dim × seq_len × bf16:
+    ~50MB per 100 tokens per node.
 
-    With beam_width=4 and max_depth=50: ~400MB peak — fits in 8GB GPU.
-    With beam_width=16 and max_depth=100: ~3.2GB — needs DGX Spark.
+    With beam_width=16 and max_depth=256: ~25GB peak — fits in DGX 128GB.
 """
 from __future__ import annotations
 
@@ -35,9 +34,9 @@ class SearchConfig:
     z_score_branch_threshold: float = 1.5    # z > θ → anomalous entropy → branch
 
     # Tree structure
-    beam_width: int = 4                      # Max children per expansion
-    max_depth: int = 64                      # Max tokens per search path
-    max_nodes: int = 256                     # Hard cap on total tree nodes (memory guard)
+    beam_width: int = 16                     # DGX: wide beam for thorough exploration
+    max_depth: int = 256                     # DGX: deep reasoning chains
+    max_nodes: int = 2048                    # DGX 128GB: generous node budget
 
     # UCB1 selection
     exploration_weight: float = 1.414        # √2 = UCB1 standard

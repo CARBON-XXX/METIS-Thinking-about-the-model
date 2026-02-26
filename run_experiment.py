@@ -46,7 +46,7 @@ from metis.pipeline.evaluator_phase import phase3_evaluate, phase4_report
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="METIS Training Experiment")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",
+    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-72B-Instruct",
                         help="HuggingFace model name")
     parser.add_argument("--device", type=str, default="auto",
                         help="Device: cuda / cpu / auto")
@@ -54,15 +54,15 @@ def main() -> None:
                         help="Output directory")
     parser.add_argument("--n-prompts", type=int, default=300,
                         help="Number of training prompts")
-    parser.add_argument("--n-samples", type=int, default=8,
+    parser.add_argument("--n-samples", type=int, default=16,
                         help="Samples per prompt")
-    parser.add_argument("--max-tokens", type=int, default=512,
+    parser.add_argument("--max-tokens", type=int, default=1024,
                         help="Max new tokens per generation")
     parser.add_argument("--dpo-epochs", type=int, default=3,
                         help="DPO training epochs")
     parser.add_argument("--dpo-lr", type=float, default=1e-6,
                         help="DPO learning rate")
-    parser.add_argument("--lora-r", type=int, default=16,
+    parser.add_argument("--lora-r", type=int, default=64,
                         help="LoRA rank")
     parser.add_argument("--phase", type=str, default="all",
                         choices=["all", "generate", "train", "eval"],
@@ -145,7 +145,7 @@ def main() -> None:
             tokenizer.pad_token = tokenizer.eos_token
         model_kwargs: Dict[str, Any] = {"trust_remote_code": True}
         if device == "cuda":
-            model_kwargs["torch_dtype"] = torch.float16
+            model_kwargs["torch_dtype"] = torch.bfloat16
         model = AutoModelForCausalLM.from_pretrained(config.model_name, **model_kwargs).to(device)
         model.eval()
 

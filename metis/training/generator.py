@@ -68,9 +68,24 @@ class MetisGenerator:
 
     @staticmethod
     def _clone_kv_cache(past_key_values):
-        """Deep-clone KV cache tensors so each sample gets independent state."""
+        """Deep-clone KV cache so each sample gets independent state.
+
+        Newer transformers (>=4.36) use DynamicCache objects with
+        get_seq_length() instead of raw tuples. We must preserve the type.
+        """
         if past_key_values is None:
             return None
+        try:
+            from transformers import DynamicCache
+            if isinstance(past_key_values, DynamicCache):
+                clone = DynamicCache()
+                for layer_idx in range(len(past_key_values)):
+                    k, v = past_key_values[layer_idx]
+                    clone.update(k.clone(), v.clone(), layer_idx)
+                return clone
+        except ImportError:
+            pass
+        # Fallback for older transformers (raw tuple format)
         return tuple(
             tuple(t.clone() for t in layer)
             for layer in past_key_values
@@ -280,11 +295,7 @@ class MetisGenerator:
             )
             results.append((text, trace))
 
-            # Sever cross-sample VRAM fragmentation accumulation
             del cloned_kv, prefilled
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
         # Release shared prompt KV cache
         del prompt_kv, first_logits

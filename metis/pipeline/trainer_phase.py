@@ -236,14 +236,14 @@ def _train_dpo(
     pairs: List[Dict],
     output_path: str,
 ) -> None:
-    """Run DPO training with LoRA (no deepcopy — saves VRAM for 8GB GPUs)."""
+    """Run DPO training with LoRA adapter."""
     from peft import LoraConfig, get_peft_model, TaskType
     from trl import DPOTrainer, DPOConfig
     from datasets import Dataset
 
     dataset = Dataset.from_list(pairs)
 
-    # Attach LoRA adapter directly to base model (no deepcopy to save VRAM)
+    # Attach LoRA adapter to base model
     lora_config = LoraConfig(
         r=config.lora_r,
         lora_alpha=config.lora_alpha,
@@ -286,5 +286,3 @@ def _train_dpo(
     # Detach LoRA adapter, restore base model for next training run
     del trainer
     train_model.unload()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()

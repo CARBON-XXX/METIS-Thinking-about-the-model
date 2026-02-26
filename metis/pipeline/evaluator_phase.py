@@ -57,27 +57,17 @@ def phase3_evaluate(
     eval_prompts = EVAL_PROMPTS[:config.n_eval_prompts]
     reward_computer = CognitiveRewardComputer()
 
-    # ─── Reload clean base model ───
-    # Phase 2 LoRA train/unload corrupts base_model weights.
-    # Reload from checkpoint to ensure fair base model evaluation.
-    # CRITICAL: do NOT use device_map="auto" — after Phase 2 training,
-    # VRAM has fragmented cache residue. Accelerate sees "low free VRAM"
-    # and offloads layers to CPU RAM, causing PCIe bus bottleneck that
-    # degrades from 15s→42s+ per prompt during autoregressive generation.
+    # Reload clean base model (Phase 2 LoRA train/unload corrupts weights)
     from transformers import AutoModelForCausalLM
     logger.info("Reloading clean base model for evaluation...")
     try:
         del base_model
     except NameError:
         pass
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
     device = config.device if config.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     base_model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
         trust_remote_code=True,
     ).to(device)
     base_model.eval()
@@ -97,20 +87,13 @@ def phase3_evaluate(
         metis_metrics = _evaluate_model(
             config, metis_model, tokenizer, eval_prompts, reward_computer, "METIS-DPO"
         )
-        # CRITICAL: PeftModel.from_pretrained injects LoRA layers INTO base_model's
-        # Linear modules. Simply deleting the PeftModel reference does NOT remove
-        # the injected layers. We must destroy and reload from scratch to prevent
-        # adapter stacking when loading Random DPO next.
+        # PeftModel injects LoRA into base_model's Linear modules — must reload
+        # to prevent adapter stacking when loading Random DPO next.
         del metis_model, base_model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.ipc_collect()
         logger.info("Reloading clean base model after METIS DPO eval...")
         base_model = AutoModelForCausalLM.from_pretrained(
             config.model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
             trust_remote_code=True,
         ).to(device)
         base_model.eval()
@@ -128,8 +111,6 @@ def phase3_evaluate(
             config, random_model, tokenizer, eval_prompts, reward_computer, "Random-DPO"
         )
         del random_model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
     else:
         logger.warning("No Random DPO checkpoint found — using base metrics as fallback")
         random_metrics = base_metrics
@@ -153,21 +134,14 @@ def phase3_evaluate(
             metis_model.eval()
             _run_benchmarks(config, metis_model, tokenizer, metis_metrics)
             del metis_model
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
-        # Random DPO benchmarks — need clean base model reload
+        # Random DPO benchmarks — need clean base model reload (adapter stacking)
         if _has_random_ckpt:
             logger.info("Reloading clean base model for Random DPO benchmarks...")
             del base_model
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
             base_model = AutoModelForCausalLM.from_pretrained(
                 config.model_name,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
                 trust_remote_code=True,
             ).to(device)
             base_model.eval()
@@ -177,8 +151,6 @@ def phase3_evaluate(
             random_model.eval()
             _run_benchmarks(config, random_model, tokenizer, random_metrics)
             del random_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
     return base_metrics, metis_metrics, random_metrics
 
@@ -302,14 +274,7 @@ def _evaluate_model(
             f"resp={text[:50]}..."
         )
 
-        # ── VRAM hygiene: prevent CUDA memory fragmentation ──
-        # Must run EVERY prompt — 50 prompts × 200 tokens of KV cache alloc/free
-        # fragments CUDA memory progressively, causing 100x+ slowdown via swap thrashing
         del trace, text
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        if (i + 1) % 10 == 0:
-            gc.collect()
 
     # Store per-prompt rewards for statistical tests
     metrics.per_prompt_rewards = total_rewards

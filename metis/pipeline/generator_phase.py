@@ -134,7 +134,7 @@ def _generate_hf(
     logger.info(f"Loading model: {config.model_name}")
     model_kwargs: Dict[str, Any] = {"trust_remote_code": True}
     if device == "cuda":
-        model_kwargs["torch_dtype"] = torch.float16
+        model_kwargs["torch_dtype"] = torch.bfloat16
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name, **model_kwargs
     ).to(device)
@@ -184,10 +184,6 @@ def _generate_hf(
                 f"resp={text[:50]}..."
             )
 
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
     if bridge is not None:
         try:
             generator.metis.remove_listener(bridge.on_signal)
@@ -235,7 +231,7 @@ def _generate_vllm_pregen(
     logger.info("[vLLM] Loading HF model for teacher-forcing...")
     model_kwargs: Dict[str, Any] = {"trust_remote_code": True}
     if device == "cuda":
-        model_kwargs["torch_dtype"] = torch.float16
+        model_kwargs["torch_dtype"] = torch.bfloat16
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name, **model_kwargs
     ).to(device)
@@ -283,10 +279,6 @@ def _generate_vllm_pregen(
                 f"tokens={trace.total_tokens} "
                 f"H={trace.mean_entropy:.3f} S={trace.mean_surprise:.3f}"
             )
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     tf_time = time.time() - t0
     logger.info(f"[vLLM] Teacher-forcing complete: {tf_time:.0f}s ({tf_time/60:.1f}m)")
@@ -338,7 +330,7 @@ def _generate_vllm_server(
     logger.info("[vLLM] Phase B: Loading HF model for teacher-forcing...")
     model_kwargs: Dict[str, Any] = {"trust_remote_code": True}
     if device == "cuda":
-        model_kwargs["torch_dtype"] = torch.float16
+        model_kwargs["torch_dtype"] = torch.bfloat16
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name, **model_kwargs
     ).to(device)
@@ -387,10 +379,6 @@ def _generate_vllm_server(
                 f"tokens={trace.total_tokens} "
                 f"H={trace.mean_entropy:.3f} S={trace.mean_surprise:.3f}"
             )
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     tf_time = time.time() - t1
     logger.info(

@@ -21,14 +21,13 @@ Usage:
         --num-generations 8 \
         --epochs 3
 
-    # On RTX 4060 (testing):
+    # Quick dev test (small model):
     python dgx/grpo_train.py \
         --model Qwen/Qwen2.5-1.5B-Instruct \
         --dataset metis_prompts.jsonl \
         --output grpo_test \
         --num-generations 4 \
-        --lora-rank 16 \
-        --bf16 false
+        --lora-rank 16
 """
 from __future__ import annotations
 
@@ -87,8 +86,8 @@ class GRPOTrainConfig:
 
     # Training
     epochs: int = 3
-    per_device_batch_size: int = 1
-    gradient_accumulation_steps: int = 8
+    per_device_batch_size: int = 4
+    gradient_accumulation_steps: int = 4
     learning_rate: float = 5e-7
     max_grad_norm: float = 1.0
     warmup_ratio: float = 0.05
@@ -305,8 +304,6 @@ class VLLMGenerationEngine:
     def shutdown(self) -> None:
         """Release vLLM resources."""
         del self._llm
-        gc.collect()
-        torch.cuda.empty_cache()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -430,8 +427,6 @@ class MetisGRPOTrainer:
         # ── 5. Release vLLM, load HF model for training ──
         vllm_engine.shutdown()
         del vllm_engine
-        gc.collect()
-        torch.cuda.empty_cache()
 
         logger.info(f"Loading HF model for training: {cfg.model_name_or_path}")
         from transformers import AutoModelForCausalLM
@@ -623,7 +618,7 @@ class MetisGRPOTrainer:
             fp16=(cfg.torch_dtype == "float16"),
             logging_steps=cfg.logging_steps,
             save_steps=cfg.save_steps,
-            gradient_checkpointing=True,
+            gradient_checkpointing=False,  # DGX 128GB: no memory-compute tradeoff needed
             max_length=cfg.max_completion_tokens + cfg.max_prompt_length,
             max_prompt_length=cfg.max_prompt_length,
             remove_unused_columns=False,
@@ -768,8 +763,8 @@ def parse_args() -> GRPOTrainConfig:
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--vllm-gpu-util", type=float, default=0.40)
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--grad-accum", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--bf16", type=str, default="true",
                         choices=["true", "false"])
     parser.add_argument("--metis-stride", type=int, default=4)

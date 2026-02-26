@@ -326,9 +326,9 @@ class MetisInference:
         refuse_grace_period: int = 8,
         refuse_consecutive_threshold: int = 3,
         # Self-correction budget control
-        max_correction_tokens: int = 96,
+        max_correction_tokens: int = 256,
         # Maximum thinking tokens before forced closure
-        max_thinking_tokens: int = 128,
+        max_thinking_tokens: int = 512,
         # Callbacks
         on_seek: Optional[Callable[[str, str], Optional[str]]] = None,
         on_token: Optional[Callable[[str, 'CognitiveSignal'], None]] = None,

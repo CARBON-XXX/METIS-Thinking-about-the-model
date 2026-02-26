@@ -13,8 +13,7 @@ Core innovation:
     - Late training: calibrated entropy → fine-grained optimization
 
 Designed for:
-    - DGX Spark (128GB unified memory): 70B models, no reload tricks
-    - RTX 4060 (8GB): small models with gradient checkpointing
+    - DGX Spark (128GB unified memory): 70B+ models, full precision
     - Multi-GPU: compatible with accelerate/DeepSpeed via TRL
 
 Usage:
@@ -49,26 +48,26 @@ logger = logging.getLogger("metis.online")
 class OnlineConfig:
     """Configuration for GRPO online training with METIS rewards."""
     # Model
-    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    model_name: str = "Qwen/Qwen2.5-72B-Instruct"
     device: str = "auto"
 
     # GRPO
-    num_generations: int = 4            # Completions per prompt (G in GRPO)
-    max_completion_length: int = 512    # Max tokens per completion
+    num_generations: int = 8            # Completions per prompt (G in GRPO)
+    max_completion_length: int = 1024   # Max tokens per completion
     temperature: float = 0.7
 
     # Training
     num_train_epochs: int = 1
-    per_device_train_batch_size: int = 2
-    gradient_accumulation_steps: int = 4
+    per_device_train_batch_size: int = 8
+    gradient_accumulation_steps: int = 2
     learning_rate: float = 5e-7
     max_grad_norm: float = 0.1
     warmup_ratio: float = 0.1
 
     # LoRA
     use_lora: bool = True
-    lora_r: int = 16
-    lora_alpha: int = 32
+    lora_r: int = 64
+    lora_alpha: int = 128
     lora_dropout: float = 0.05
 
     # METIS reward
@@ -208,10 +207,6 @@ class MetisCognitiveRewardFn:
                 logger.warning(f"[METIS Reward] Error on completion {i}: {e}")
                 rewards.append(0.0)
 
-        # Periodic VRAM cleanup
-        if self._call_count % 10 == 0 and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
         if self._call_count % 50 == 0:
             avg_r = sum(rewards) / max(len(rewards), 1)
             logger.info(
@@ -333,7 +328,7 @@ def run_online_grpo(config: OnlineConfig) -> None:
         save_steps=config.save_steps,
         report_to=config.report_to,
         bf16=torch.cuda.is_available(),
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,  # DGX 128GB: no need to trade compute for memory
     )
 
     # ─── Initialize trainer ───
@@ -381,16 +376,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="METIS GRPO Online Training — Cognitive RL without LLM-as-judge"
     )
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-72B-Instruct")
     parser.add_argument("--dataset", type=str, default="",
                         help="HuggingFace dataset name (empty = use METIS built-in prompts)")
     parser.add_argument("--output", type=str, default="./grpo_output")
-    parser.add_argument("--num-generations", type=int, default=4)
-    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--num-generations", type=int, default=8)
+    parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=5e-7)
-    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-r", type=int, default=64)
     parser.add_argument("--no-lora", action="store_true")
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--report-to", type=str, default="none",
