@@ -2360,6 +2360,125 @@ class MetisInference:
 
         return hallucination_corrected, raw_text
 
+    # ═══════════════════════════════════════════════════════
+    # Entropy-Guided Tree Search (EGTS) — "Autopilot" Mode
+    # ═══════════════════════════════════════════════════════
+
+    @torch.no_grad()
+    def search_generate(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        chat_template: bool = True,
+        search_config: Optional[Any] = None,
+        enable_counterfactual: bool = True,
+    ) -> InferenceResult:
+        """
+        METIS search-mode generation: entropy-guided tree search + counterfactual.
+
+        Instead of linear generation that stops at uncertainty, this method
+        explores multiple reasoning paths via tree search, selecting the one
+        where entropy converges (genuine understanding).
+
+        At high-risk decision points (CUSUM alarm), counterfactual simulation
+        probes whether the conclusion is premise-sensitive.
+
+        Args:
+            prompt: Input text
+            max_tokens: Max tokens for tree search
+            chat_template: Apply chat template
+            search_config: SearchConfig override (None = defaults)
+            enable_counterfactual: Run counterfactual simulation at branch points
+
+        Returns:
+            InferenceResult with best path text + cognitive metadata
+        """
+        from metis.search.entropy_search import EntropyGuidedSearch, SearchResult
+        from metis.search.tree_node import SearchConfig
+
+        model = self._metis.model
+        tokenizer = self._metis.tokenizer
+        if model is None or tokenizer is None:
+            raise ValueError("model and tokenizer required. Use Metis.attach() first.")
+
+        start_time = time.perf_counter()
+
+        cfg = search_config or SearchConfig()
+        searcher = EntropyGuidedSearch(model, tokenizer, config=cfg)
+        result: SearchResult = searcher.search(
+            prompt, max_tokens=max_tokens, chat_template=chat_template,
+        )
+
+        # ── Counterfactual simulation on high-entropy branch points ──
+        cf_results: List[Any] = []
+        if enable_counterfactual and result.branch_points > 0:
+            from metis.search.counterfactual import CounterfactualSimulator
+            cf_sim = CounterfactualSimulator(model, tokenizer, config=cfg)
+
+            # Run CF at the highest-entropy point in the selected path
+            if result.path_entropies:
+                max_h_idx = max(
+                    range(len(result.path_entropies)),
+                    key=lambda i: result.path_entropies[i],
+                )
+                max_h = result.path_entropies[max_h_idx]
+
+                if max_h > cfg.entropy_branch_threshold:
+                    # Prepare prompt IDs for CF
+                    if chat_template and hasattr(tokenizer, "apply_chat_template"):
+                        messages = [{"role": "user", "content": prompt}]
+                        text = tokenizer.apply_chat_template(
+                            messages, tokenize=False, add_generation_prompt=True,
+                        )
+                    else:
+                        text = prompt
+                    prompt_ids = tokenizer.encode(text, return_tensors="pt")
+                    if not isinstance(prompt_ids, torch.Tensor):
+                        prompt_ids = torch.tensor([prompt_ids])
+                    prompt_ids = prompt_ids.to(model.device)
+
+                    cf_result = cf_sim.simulate(
+                        prompt_ids=prompt_ids,
+                        kv_cache=None,  # Full recompute for CF branches
+                        generated_tokens=result.tokens[:max_h_idx],
+                        original_entropy=max_h,
+                    )
+                    cf_results.append(cf_result)
+
+                    logger.info(
+                        f"[METIS Search] CF verdict: {cf_result.verdict} "
+                        f"(F={cf_result.fragility_score:.3f})"
+                    )
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+        # ── Build InferenceResult ──
+        avg_entropy = (
+            sum(result.path_entropies) / max(len(result.path_entropies), 1)
+            if result.path_entropies else 0.0
+        )
+
+        introspection_parts = [
+            f"EGTS: {result.total_nodes_created} nodes, "
+            f"{result.branch_points} branches, "
+            f"path_H={result.best_path_entropy:.3f}",
+        ]
+        if cf_results:
+            cf = cf_results[0]
+            introspection_parts.append(
+                f"CF: {cf.verdict} (F={cf.fragility_score:.3f})"
+            )
+
+        return InferenceResult(
+            text=result.text,
+            tokens_generated=len(result.tokens),
+            latency_ms=elapsed_ms,
+            avg_token_entropy=avg_entropy,
+            uncertainty_score=result.best_path_entropy,
+            system2_triggered=result.branch_points > 0,
+            introspection=" | ".join(introspection_parts),
+        )
+
     @staticmethod
     def _build_introspection(
         *,
