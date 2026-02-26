@@ -40,7 +40,6 @@ from .core.types import (
     MetaJudgment,
     SemanticEntropyResult,
 )
-from .cognitive.cot import CoTManager
 
 logger = logging.getLogger(__name__)
 
@@ -58,184 +57,8 @@ logger = logging.getLogger(__name__)
 #   3. Short (< 30 tokens) → doesn't waste thinking budget
 #   4. Ends mid-sentence → model must CONTINUE the reasoning, not start fresh
 
-def _has_cjk(text: str) -> bool:
-    """Detect if text contains CJK characters (Chinese/Japanese/Korean)."""
-    for ch in text:
-        cp = ord(ch)
-        if (0x4E00 <= cp <= 0x9FFF      # CJK Unified Ideographs
-            or 0x3400 <= cp <= 0x4DBF    # CJK Extension A
-            or 0x3000 <= cp <= 0x303F    # CJK Punctuation
-            or 0x3040 <= cp <= 0x30FF):  # Hiragana + Katakana
-            return True
-    return False
 
 
-def _extract_last_sentence(text: str, max_len: int = 80) -> str:
-    """Extract the last complete sentence from draft text.
-
-    Used by v6 scaffold to give System 2 a concrete claim to verify,
-    without injecting the full draft (which wastes budget and dilutes focus).
-    """
-    if not text or not text.strip():
-        return ""
-    # Split on Chinese/English sentence terminators
-    sentences = re.split(r'(?<=[。！？.!?\n])', text.strip())
-    sentences = [s.strip() for s in sentences if s.strip()]
-    if not sentences:
-        return ""
-    last = sentences[-1]
-    if len(last) > max_len:
-        last = last[:max_len] + "..."
-    return last
-
-
-def _build_reasoning_scaffold(
-    strategy: CoTStrategy,
-    user_input: str,
-    draft_text: str = "",
-) -> str:
-    """
-    Build a reasoning scaffold for CoT injection.
-
-    v6 — "Query + Draft Conclusion" (查询锚点 + 结论锚点):
-
-    PRINCIPLE: Scaffold = query + last sentence of draft (if available).
-
-    WHY re-introduce draft?
-      v5 removed draft entirely to prevent Phantom Debate ("X vs Y" → model
-      invents non-existent conflicts). But this severed the link between
-      System 1 and System 2 completely — System 2 couldn't critique what
-      System 1 said because it had no explicit reference to it.
-
-      Result: System 2 just re-ran System 1's reasoning and got the same
-      wrong answer (e.g., the 1/3 probability trap).
-
-    HOW to avoid Phantom Debate?
-      1. No "vs" token — use neutral arrow "→" (factual reference)
-      2. Only inject the LAST SENTENCE (the conclusion/claim), not full draft
-      3. Format: query\\n→ conclusion\\n
-         This tells System 2: "The question was X. You claimed Y. Verify."
-
-    COLD START (no draft): Falls back to query-only (same as v5).
-
-    Args:
-        strategy: CoT strategy (used for logging only, not scaffold text)
-        user_input: Original user prompt
-        draft_text: System 1's draft output (last sentence extracted)
-
-    Returns:
-        Scaffold string to inject after <thinking> tag
-    """
-    # Query preview: full input up to 120 chars
-    q = user_input[:120].strip()
-    if len(user_input) > 120:
-        q += "..."
-
-    # Extract draft conclusion for System 2 to critique
-    conclusion = _extract_last_sentence(draft_text)
-
-    # V11: Multi-level scaffold. Start at Level 2 (strategic) — model gets
-    # the key contradiction but must construct the proof itself. If it fails
-    # (evasion/panic), L10 will degrade to Level 1 (guided doom) at runtime.
-    counterfactual_guide = _build_counterfactual_scaffold(user_input, level=2)
-
-    if conclusion:
-        return f'{counterfactual_guide}"{q}"\n→ {conclusion}\n'
-    else:
-        return f'{counterfactual_guide}"{q}"\n'
-
-
-def _parse_counterfactual(user_input: str):
-    """Parse counterfactual math premise from user input.
-
-    Extracts equations like "如果 1+1=3" or "if 2+2=5".
-
-    Returns:
-        Tuple (a, op, b, false_result, real_result) or None if not counterfactual.
-    """
-    m = re.search(r'[如假][果设]\s*(\d+)\s*([+\-×÷*/])\s*(\d+)\s*[=＝]\s*(\d+)', user_input)
-    if not m:
-        m = re.search(r'(?:if|suppose|assume)\s+(\d+)\s*([+\-*/])\s*(\d+)\s*=\s*(\d+)', user_input, re.I)
-    if not m:
-        return None
-    a, op, b, false_result = int(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4))
-    _ops = {'+': lambda x, y: x + y, '-': lambda x, y: x - y,
-            '*': lambda x, y: x * y, '×': lambda x, y: x * y,
-            '/': lambda x, y: x / y, '÷': lambda x, y: x / y}
-    op_fn = _ops.get(op)
-    if op_fn is None:
-        return None
-    try:
-        real_result = int(op_fn(a, b))
-    except (ZeroDivisionError, ValueError):
-        return None
-    if real_result == false_result:
-        return None
-    return (a, op, b, false_result, real_result)
-
-
-def _build_counterfactual_scaffold(user_input: str, level: int = 2) -> str:
-    """V11 Multi-level scaffold for counterfactual premises.
-
-    Provides three cognitive tiers, enabling dynamic degradation:
-
-    Level 3 (metacognitive): Abstract goal + method name only.
-        Model must independently identify the contradiction and explain collapse.
-        Tests genuine reasoning ability — will fail on weak models.
-
-    Level 2 (strategic): Method + key equation + strategic direction.
-        Model gets the core insight (which numbers are equal) but must
-        construct the full proof chain and generalization itself.
-
-    Level 1 (guided doom): Complete 7-step proof chain.
-        Model only needs to elaborate/restate — fill-in-the-blanks mode.
-        Guaranteed output quality but no active reasoning.
-
-    Returns empty string if not a counterfactual premise.
-    """
-    parsed = _parse_counterfactual(user_input)
-    if parsed is None:
-        return ""
-    a, op, b, false_result, real_result = parsed
-    diff = false_result - real_result
-
-    if level >= 3:
-        # Metacognitive: abstract goal only — model must find the path
-        return (
-            "[CRITICAL ANALYSIS MODE]\n"
-            "The user's premise contradicts a fundamental arithmetic axiom.\n"
-            "Task: Use proof by contradiction (reductio ad absurdum).\n"
-            "1. Assume the premise is true.\n"
-            "2. Derive a contradiction with standard axioms.\n"
-            "3. Show how this contradiction destroys the entire number system.\n"
-            "Do NOT accommodate the premise. Do NOT escape to modular arithmetic.\n"
-        )
-    elif level == 2:
-        # Strategic: method + key insight — model must construct the proof
-        return (
-            "[STRATEGIC ANALYSIS]\n"
-            f"Method: Proof by contradiction.\n"
-            f"Key contradiction: {a}{op}{b}={false_result} (premise) vs "
-            f"{a}{op}{b}={real_result} (axiom) → {false_result}={real_result}.\n"
-            f"Strategy: Use algebra to show this absurdity makes ALL numbers "
-            f"equal (Principle of Explosion). Show the system is destroyed.\n"
-            f"Do NOT escape to modular arithmetic or redefine symbols.\n"
-        )
-    else:
-        # Level 1: Guided Doom — complete proof chain (fill-in-the-blanks)
-        return (
-            f"[PROOF PATH]\n"
-            f"1. Premise: {a}{op}{b} = {false_result} (given by user)\n"
-            f"2. Axiom:   {a}{op}{b} = {real_result} (standard arithmetic)\n"
-            f"3. From (1) and (2): {false_result} = {real_result}\n"
-            f"4. Subtract {real_result}: {false_result}-{real_result} = 0, "
-            f"so {diff} = 0\n"
-            f"5. For any N: N × {diff} = N × 0 = 0, so N = 0\n"
-            f"6. ALL numbers equal 0. The formal system is destroyed.\n"
-            f"7. This is the Principle of Explosion (Ex Falso Quodlibet):\n"
-            f"   from a contradiction, ANY statement can be proven true.\n"
-            f"Follow this proof. Do NOT escape to modular arithmetic or redefine symbols.\n"
-        )
 
 
 def _detect_thinking_evasion(text: str) -> str:
@@ -358,7 +181,6 @@ class MetisInference:
         self._refuse_consecutive = refuse_consecutive_threshold
         self._max_correction_tokens = max_correction_tokens
         self._max_thinking_tokens = max_thinking_tokens
-        self._cot_manager = CoTManager()
         self._on_seek = on_seek
         self._on_token = on_token
 
@@ -419,10 +241,9 @@ class MetisInference:
         else:
             text = prompt
             
-        # Thinking Protocol injection (Force start) + reasoning scaffold
+        # Thinking Protocol injection (Force start)
         if use_thinking_protocol:
-            scaffold = _build_reasoning_scaffold(CoTStrategy.STANDARD, prompt)
-            text += f"<thinking>\n{scaffold}"
+            text += f"<thinking>\n"
 
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
         input_ids = inputs.input_ids
@@ -432,7 +253,6 @@ class MetisInference:
 
         # Start METIS session
         self._metis.start_session(prompt)
-        self._cot_manager.reset()
 
         generated_tokens: List[int] = []
         vis_buffer: List[Tuple[str, CognitiveSignal]] = []
@@ -440,7 +260,6 @@ class MetisInference:
         boundary_interventions = 0
         was_refused = False
         consecutive_refuse = 0
-        cot_strategies_used: List[CoTStrategy] = []
         seek_results: List[str] = []
         
         # Thinking Protocol state tracking
@@ -496,22 +315,8 @@ class MetisInference:
         _COT_DEFER_MAX = 30  # Max tokens to wait for sentence boundary
         _SENTENCE_BREAKS = frozenset('\u3002\uff01\uff1f\n.!?\uff1a:')
 
-        # L8: Verification Cycle state — up to 3 rounds of self-play
-        # Round 1: Self-critique  Round 2: Strategic scaffold  Round 3: Guided Doom
-        verification_count = 0
-        _L8_MAX_ROUNDS = 3
-
-        # V11: Multi-level scaffold degradation state
-        # Starts at Level 2 (strategic). L10 degrades on evasion detection.
-        scaffold_level = 2
-
-        # L10: Evasion Detection — catch model escaping to modular arithmetic etc.
-        _L10_CHECK_INTERVAL = 5   # Check every N thinking tokens
-        _L10_CHECK_START = 10     # Don't check before this many thinking tokens
-        _L10_ROLLBACK_WINDOW = 15 # Tokens to trim on evasion rollback
-        _l10_evasion_count = 0    # Track how many evasions detected (max 2 rollbacks)
-
-        # If thinking protocol enabled, <thinking> + scaffold are already in
+        
+        # If thinking protocol enabled, <thinking> is already in
         # prompt_ids (injected at line 284-287 before tokenization).
         # We only notify the visualizer callback here — do NOT add tokens to
         # generated_tokens (line 1409 handles _split_thinking prepend) and
@@ -588,117 +393,6 @@ class MetisInference:
             # CUSUM detects sustained difficulty, but injection waits for a
             # natural sentence break so the model enters thinking from a
             # coherent context — not mid-sentence.
-            self._cot_manager.observe(signal)
-
-            if not cot_pending and self._cot_manager.should_inject() and not is_thinking:
-                cot_pending = True
-                cot_pending_strategy = self._cot_manager.select_strategy(signal)
-                cot_pending_since = step
-                logger.info(
-                    f"[METIS] CoT CUSUM triggered at step {step}, "
-                    f"deferring to sentence boundary"
-                )
-
-            # Check if deferred CoT should fire now (sentence boundary or timeout)
-            if cot_pending and not is_thinking:
-                # Check last generated token for sentence-ending punctuation
-                last_char = ''
-                if generated_tokens:
-                    last_text = tokenizer.decode(generated_tokens[-1:], skip_special_tokens=True)
-                    last_char = last_text[-1] if last_text else ''
-                deferred_too_long = (step - cot_pending_since) >= _COT_DEFER_MAX
-
-                if last_char in _SENTENCE_BREAKS or deferred_too_long:
-                    strategy = cot_pending_strategy
-                    cot_pending = False
-                    cot_pending_strategy = None
-
-                    if deferred_too_long:
-                        logger.info(f"[METIS] CoT defer timeout at step {step}")
-
-                    # Check for existing repetition before starting thinking
-                    max_window = min(len(generated_tokens) // 2, 256)
-                    rep_len, _ = self._detect_repetition_hybrid(
-                        generated_tokens, max_window
-                    )
-                    if rep_len > 0:
-                        logger.info(
-                            f"[METIS] Pre-CoT Repetition Trim: removed {rep_len} tokens"
-                        )
-                        generated_tokens = generated_tokens[:-rep_len]
-                        vis_buffer.clear()
-                        last_sentence_end_idx = min(last_sentence_end_idx, len(generated_tokens))
-
-                        if generated_tokens:
-                            gen_ids = torch.tensor([generated_tokens], device=model.device)
-                            full_input = torch.cat([prompt_ids, gen_ids], dim=1)
-                        else:
-                            full_input = prompt_ids
-
-                        with torch.no_grad():
-                            clean_out = model(
-                                input_ids=full_input,
-                                use_cache=True,
-                                return_dict=True,
-                            )
-                        past_key_values = clean_out.past_key_values
-                        logits = clean_out.logits[:, -1, :]
-
-                    # L6: Save rollback checkpoint before injecting <thinking>
-                    draft_rollback_idx = last_sentence_end_idx
-                    think_block_start_idx = len(generated_tokens)
-
-                    # Open <thinking> tag + Critique Loop scaffold
-                    # Extract draft text so model can "look back" at its own output
-                    _draft = tokenizer.decode(
-                        generated_tokens, skip_special_tokens=True
-                    ).strip() if generated_tokens else ""
-                    scaffold = _build_reasoning_scaffold(strategy, prompt, draft_text=_draft)
-                    think_open = f"\n<thinking>\n{scaffold}"
-                    think_open_ids = tokenizer.encode(think_open, add_special_tokens=False)
-                    for tid in think_open_ids:
-                        generated_tokens.append(tid)
-                    if self._on_token is not None:
-                        open_signal = CognitiveSignal(
-                            decision=Decision.DEEP,
-                            introspection=f"[Thinking: {strategy.value}]",
-                        )
-                        self._on_token(think_open, open_signal)
-
-                    open_input = torch.tensor([think_open_ids], device=model.device)
-                    open_out = model(
-                        input_ids=open_input,
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                        return_dict=True,
-                    )
-                    past_key_values = open_out.past_key_values
-                    logits = open_out.logits[:, -1, :]
-
-                    is_thinking = True
-                    thinking_start_step = step
-                    self._cot_manager.record_injection(strategy)
-                    cot_strategies_used.append(strategy)
-
-                    # L2: Dynamic thinking budget based on CUSUM magnitude
-                    # Higher CUSUM at trigger = deeper confusion = more thinking time
-                    # Note: CUSUM was just reset by record_injection(), use pre-reset stats
-                    _THINK_BUDGET_MIN = 32   # 1-2 sentences of analysis
-                    _THINK_BUDGET_MAX = 256  # Enough for truth tables / multi-step verification
-                    _cusum_at_trigger = signal.z_score  # Use z-score as proxy (CUSUM already reset)
-                    _cusum_ratio = min(max(_cusum_at_trigger / 2.0, 0.0), 2.0)
-                    dynamic_thinking_budget = int(
-                        _THINK_BUDGET_MIN + (_THINK_BUDGET_MAX - _THINK_BUDGET_MIN) * _cusum_ratio
-                    )
-                    # Reset thinking trackers for this new block
-                    thinking_entropies.clear()
-                    thinking_decisions.clear()
-
-                    logger.info(
-                        f"[METIS] Thinking injected at step {step}: "
-                        f"reason={strategy.value}, z={signal.z_score:.2f}, "
-                        f"budget={dynamic_thinking_budget} tokens"
-                    )
 
             # --- Boundary guard action execution ---
             if signal.boundary_action == BoundaryAction.REFUSE:
@@ -854,14 +548,8 @@ class MetisInference:
                         draft_rollback_idx = last_sentence_end_idx
                         think_block_start_idx = len(generated_tokens)
 
-                        # Inject <thinking> tag + Critique Loop scaffold (model is stuck)
-                        _draft = tokenizer.decode(
-                            generated_tokens, skip_special_tokens=True
-                        ).strip() if generated_tokens else ""
-                        scaffold = _build_reasoning_scaffold(
-                            CoTStrategy.REFLECTION, prompt, draft_text=_draft
-                        )
-                        think_open = f"\n<thinking>\n{scaffold}"
+                        # Inject <thinking> tag (model is stuck)
+                        think_open = f"\n<thinking>\n"
                         think_open_ids = tokenizer.encode(
                             think_open, add_special_tokens=False
                         )
