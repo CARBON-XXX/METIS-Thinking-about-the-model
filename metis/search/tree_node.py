@@ -116,6 +116,7 @@ class TreeNode:
         self.decision = decision
         self.cusum_alarm = cusum_alarm
         self.entropy_gradient = entropy_gradient
+        self.predictive_entropy_value: Optional[float] = None  # Expected terminal entropy E[H(T)]
 
         # UCB1 statistics
         self.visit_count = 0
@@ -154,11 +155,16 @@ class TreeNode:
 
         UCB1 = Q(s) + c * √(ln(N_parent) / N_child)
 
-        Modified: Q(s) = -entropy (prefer low-entropy paths)
+        Modified: Q(s) combines immediate entropy and predicted terminal entropy.
         """
         if self.visit_count == 0:
             return float("inf")  # Unexplored → highest priority
+            
         exploitation = self.value
+        # If we have a predictive value network estimate, blend it in (alpha=0.5)
+        if self.predictive_entropy_value is not None:
+            exploitation = 0.5 * exploitation + 0.5 * (-self.predictive_entropy_value)
+            
         exploration = c * math.sqrt(math.log(parent_visits) / self.visit_count)
         return exploitation + exploration
 
