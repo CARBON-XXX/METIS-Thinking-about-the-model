@@ -488,6 +488,12 @@ class ExperimentConfig:
     n_train_prompts: int = 300           # High to survive 60-70% rejection from cognitive filter
     n_eval_prompts: int = 50              # Sufficient for p<0.05 statistical significance
 
+    # External benchmarks (independent validation)
+    run_benchmarks: bool = True           # Run TruthfulQA + MMLU
+    truthfulqa_questions: int = 200       # Max TruthfulQA questions (817 total)
+    mmlu_subjects: int = 10               # Number of MMLU subjects (28 available)
+    mmlu_per_subject: int = 30            # Questions per MMLU subject
+
 
 @dataclass
 class EvalMetrics:
@@ -514,9 +520,16 @@ class EvalMetrics:
     fast_ratio: float = 0.0
     avg_tokens: float = 0.0
 
-    def to_dict(self) -> Dict[str, float]:
-        return {k: round(v, 4) if isinstance(v, float) else v
-                for k, v in asdict(self).items()}
+    # External benchmarks (independent validation)
+    truthfulqa_mc1: float = 0.0
+    truthfulqa_mc2: float = 0.0
+    mmlu_accuracy: float = 0.0
+    benchmark_details: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {k: round(v, 4) if isinstance(v, float) else v
+             for k, v in asdict(self).items()}
+        return d
 
 
 # ═══════════════════════════════════════════════════════
@@ -526,17 +539,19 @@ class EvalMetrics:
 def phase1_generate(
     config: ExperimentConfig,
     vllm_url: Optional[str] = None,
+    vllm_data_path: Optional[str] = None,
 ) -> Tuple[List[Dict], Any, Any]:
     """
     Generate K responses per prompt with METIS instrumentation.
     Returns scored data + model + tokenizer for reuse.
 
-    If vllm_url is set, uses two-phase generation:
-      Phase A: vLLM batch generation (fast, parallel)
-      Phase B: Teacher-forcing for METIS traces (accurate)
+    Modes:
+      - Default: HuggingFace token-by-token generation
+      - vllm_url: vLLM server + teacher-forcing
+      - vllm_data_path: Load pre-generated vLLM samples + teacher-forcing only
     """
     logger.info(f"{'='*60}")
-    mode_str = "vLLM 2-phase" if vllm_url else "HuggingFace"
+    mode_str = "vLLM pre-gen" if vllm_data_path else ("vLLM 2-phase" if vllm_url else "HuggingFace")
     logger.info(f"PHASE 1: Generate & Score ({config.n_train_prompts} prompts × {config.n_samples_per_prompt} samples) [{mode_str}]")
     logger.info(f"{'='*60}")
 
@@ -570,9 +585,101 @@ def phase1_generate(
         bridge = None
 
     # ═══════════════════════════════════════════════════════
-    # vLLM Two-Phase Path
+    # vLLM Pre-generated Data Path (offline batch)
     # ═══════════════════════════════════════════════════════
-    if vllm_url:
+    if vllm_data_path:
+        from metis.training.vllm_generator import VLLMBatchGenerator
+
+        logger.info(f"[vLLM] Loading pre-generated samples from {vllm_data_path}")
+        with open(vllm_data_path, "r", encoding="utf-8") as f:
+            raw_samples = json.load(f)
+        logger.info(f"[vLLM] Loaded {len(raw_samples)} samples")
+
+        # Group by prompt_idx
+        by_prompt: Dict[int, List[Dict]] = {}
+        for s in raw_samples:
+            idx = s["prompt_idx"]
+            if idx not in by_prompt:
+                by_prompt[idx] = []
+            by_prompt[idx].append({"text": s["text"], "token_logprobs": [], "finish_reason": s.get("finish_reason", "stop"), "temperature": s.get("temperature", 0.7)})
+
+        # Load HF model for teacher-forcing
+        logger.info("[vLLM] Loading HF model for teacher-forcing...")
+        model_kwargs: Dict[str, Any] = {"trust_remote_code": True}
+        if device == "cuda":
+            model_kwargs["torch_dtype"] = torch.float16
+        model = AutoModelForCausalLM.from_pretrained(
+            config.model_name, **model_kwargs
+        ).to(device)
+        model.eval()
+
+        vllm_gen = VLLMBatchGenerator(model_name=config.model_name)
+
+        if bridge is not None:
+            bridge.phase = "teacher-force"
+
+        all_data: List[Dict] = []
+        t0 = time.time()
+
+        for i, prompt in enumerate(prompts):
+            if i not in by_prompt:
+                logger.warning(f"[vLLM] No samples for prompt {i}, skipping")
+                continue
+            logger.info(f"[TF] [{i+1}/{len(prompts)}] {prompt[:50]}...")
+            if bridge is not None:
+                bridge.prompt_index = i + 1
+                bridge.current_prompt = prompt
+
+            samples_for_prompt = by_prompt[i]
+            results = vllm_gen.teacher_force_traces(
+                prompt, samples_for_prompt, model, tokenizer,
+            )
+
+            for j, (text, trace) in enumerate(results):
+                if bridge is not None:
+                    bridge.sample_index = j + 1
+                if not text or trace.total_tokens == 0:
+                    continue
+                if trace.total_tokens > 5 and trace.mean_entropy == 0.0:
+                    logger.warning(f"[TF] Skipping prompt {i+1} sample {j}: mean_entropy==0")
+                    continue
+
+                reward = reward_computer.compute(trace)
+                if bridge is not None:
+                    bridge.push_reward(reward.to_dict(), j, text)
+                entry = {
+                    "prompt": prompt,
+                    "chat_prompt": _format_chat(tokenizer, prompt),
+                    "response": text,
+                    "sample_idx": j,
+                    "reward_total": reward.total,
+                    "reward_breakdown": reward.to_dict(),
+                    "trace_stats": {
+                        "total_tokens": trace.total_tokens,
+                        "mean_entropy": trace.mean_entropy,
+                        "mean_surprise": trace.mean_surprise,
+                        "fast_ratio": trace.fast_count / max(trace.total_tokens, 1),
+                        "deep_ratio": trace.deep_count / max(trace.total_tokens, 1),
+                    },
+                }
+                all_data.append(entry)
+                logger.info(
+                    f"  sample {j}: reward={reward.total:+.4f} "
+                    f"tokens={trace.total_tokens} "
+                    f"H={trace.mean_entropy:.3f} S={trace.mean_surprise:.3f}"
+                )
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        tf_time = time.time() - t0
+        logger.info(f"[vLLM] Teacher-forcing complete: {tf_time:.0f}s ({tf_time/60:.1f}m)")
+
+    # ═══════════════════════════════════════════════════════
+    # vLLM Two-Phase Path (server mode)
+    # ═══════════════════════════════════════════════════════
+    elif vllm_url:
         from metis.training.vllm_generator import VLLMBatchGenerator
 
         vllm_gen = VLLMBatchGenerator(
@@ -917,44 +1024,45 @@ def _build_metis_pairs(scored_data: List[Dict]) -> List[Dict]:
                     chosen, rejected = best_fast, worst_deep
                     pair_type = "veto_fast_wins"
 
-        # Strategy B: Homogeneous matching (same-type, full reward_total)
+        # Strategy B: Homogeneous matching — generate MULTIPLE pairs per prompt
+        # With 8 samples, top-2 vs bottom-2 gives up to 4 extra pairs
         if chosen is None:
-            # Use full reward_total within same type
             all_sorted = sorted(samples, key=lambda x: x["reward_total"], reverse=True)
-            best = all_sorted[0]
-            # Find worst with comparable length
-            worst = None
-            for candidate in reversed(all_sorted):
-                if candidate is best:
-                    continue
-                len_best = len(best["response"])
-                len_cand = len(candidate["response"])
-                ratio = max(len_best, len_cand) / max(min(len_best, len_cand), 1)
-                if ratio <= 1.5:
-                    worst = candidate
-                    break
-            if worst is None:
-                worst = all_sorted[-1]
+            n_half = max(len(all_sorted) // 3, 1)  # top-third vs bottom-third
+            tops = all_sorted[:n_half]
+            bots = all_sorted[-n_half:]
 
-            margin = best["reward_total"] - worst["reward_total"]
-            if margin >= MARGIN_THRESHOLD:
-                chosen, rejected = best, worst
-                pair_type = "homo"
+            added_any = False
+            for t in tops:
+                for b in bots:
+                    if t is b:
+                        continue
+                    margin = t["reward_total"] - b["reward_total"]
+                    if margin < MARGIN_THRESHOLD:
+                        continue
+                    len_t, len_b = len(t["response"]), len(b["response"])
+                    ratio = max(len_t, len_b) / max(min(len_t, len_b), 1)
+                    if ratio > 1.5:
+                        continue
+                    pairs.append({
+                        "prompt": t["chat_prompt"],
+                        "chosen": t["response"],
+                        "rejected": b["response"],
+                    })
+                    n_homo_pairs += 1
+                    added_any = True
 
-        if chosen is None:
-            n_margin_fail += 1
-            continue
-
-        if pair_type == "homo":
-            n_homo_pairs += 1
+            if not added_any:
+                n_margin_fail += 1
+                continue
         else:
-            n_veto_pairs += 1
-
-        pairs.append({
-            "prompt": chosen["chat_prompt"],
-            "chosen": chosen["response"],
-            "rejected": rejected["response"],
-        })
+            if pair_type.startswith("veto"):
+                n_veto_pairs += 1
+            pairs.append({
+                "prompt": chosen["chat_prompt"],
+                "chosen": chosen["response"],
+                "rejected": rejected["response"],
+            })
 
     n_pass = len(pairs)
     logger.info(
@@ -1158,7 +1266,82 @@ def phase3_evaluate(
         logger.warning("No Random DPO checkpoint found — using base metrics as fallback")
         random_metrics = base_metrics
 
+    # ─── External Benchmarks (independent validation) ───
+    if config.run_benchmarks:
+        logger.info(f"{'='*60}")
+        logger.info("PHASE 3b: External Benchmarks (TruthfulQA + MMLU)")
+        logger.info(f"{'='*60}")
+
+        from metis.training.benchmarks import BenchmarkSuite
+
+        # Base model benchmarks (model already loaded above)
+        logger.info("Benchmarking: Base Model")
+        _run_benchmarks(config, base_model, tokenizer, base_metrics)
+
+        # METIS DPO benchmarks
+        if _has_metis_ckpt:
+            logger.info("Benchmarking: METIS DPO")
+            metis_model = PeftModel.from_pretrained(base_model, metis_path)
+            metis_model.eval()
+            _run_benchmarks(config, metis_model, tokenizer, metis_metrics)
+            del metis_model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Random DPO benchmarks — need clean base model reload
+        if _has_random_ckpt:
+            logger.info("Reloading clean base model for Random DPO benchmarks...")
+            del base_model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            base_model = AutoModelForCausalLM.from_pretrained(
+                config.model_name,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                trust_remote_code=True,
+            ).to(device)
+            base_model.eval()
+
+            logger.info("Benchmarking: Random DPO")
+            random_model = PeftModel.from_pretrained(base_model, random_path)
+            random_model.eval()
+            _run_benchmarks(config, random_model, tokenizer, random_metrics)
+            del random_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     return base_metrics, metis_metrics, random_metrics
+
+
+def _run_benchmarks(
+    config: ExperimentConfig,
+    model: Any,
+    tokenizer: Any,
+    metrics: EvalMetrics,
+) -> None:
+    """Run external benchmarks and fill in metrics fields."""
+    from metis.training.benchmarks import BenchmarkSuite
+
+    suite = BenchmarkSuite(model, tokenizer)
+
+    tqa = suite.run_truthfulqa(max_questions=config.truthfulqa_questions)
+    metrics.truthfulqa_mc1 = tqa.accuracy
+    metrics.truthfulqa_mc2 = tqa.sub_scores.get("mc2_accuracy", 0.0)
+    metrics.benchmark_details["truthfulqa"] = tqa.to_dict()
+
+    mmlu = suite.run_mmlu(
+        n_subjects=config.mmlu_subjects,
+        max_per_subject=config.mmlu_per_subject,
+    )
+    metrics.mmlu_accuracy = mmlu.accuracy
+    metrics.benchmark_details["mmlu"] = mmlu.to_dict()
+
+    logger.info(
+        f"  [{metrics.name}] TruthfulQA MC1={metrics.truthfulqa_mc1:.1%} "
+        f"MC2={metrics.truthfulqa_mc2:.1%} | MMLU={metrics.mmlu_accuracy:.1%}"
+    )
 
 
 def _evaluate_model(
@@ -1329,6 +1512,10 @@ def phase4_report(
         ("Confusion Ratio", base.confusion_ratio, metis.confusion_ratio, random_ctrl.confusion_ratio),
         ("Fast (Sys1) Ratio", base.fast_ratio, metis.fast_ratio, random_ctrl.fast_ratio),
         ("Avg Tokens", base.avg_tokens, metis.avg_tokens, random_ctrl.avg_tokens),
+        ("", 0, 0, 0),  # spacer
+        ("▸ TruthfulQA MC1", base.truthfulqa_mc1, metis.truthfulqa_mc1, random_ctrl.truthfulqa_mc1),
+        ("▸ TruthfulQA MC2", base.truthfulqa_mc2, metis.truthfulqa_mc2, random_ctrl.truthfulqa_mc2),
+        ("▸ MMLU", base.mmlu_accuracy, metis.mmlu_accuracy, random_ctrl.mmlu_accuracy),
     ]
 
     for label, base_v, metis_v, rand_v in rows:
@@ -1406,66 +1593,34 @@ def phase4_report(
     else:
         print(f"    {C.DIM}Too few samples for statistical tests (n<5){C.RESET}")
 
-    # ─── Statistical Analysis ───
-    print(f"\n{C.BOLD}  Statistical Analysis:{C.RESET}")
-
-    metis_rewards = metis.per_prompt_rewards
-    random_rewards = random_ctrl.per_prompt_rewards
-    base_rewards = base.per_prompt_rewards
-
-    if len(metis_rewards) >= 5 and len(random_rewards) >= 5:
-        # Paired bootstrap CI for METIS vs Random
-        n_boot = 10000
-        rng = random.Random(42)
-        n_eval = min(len(metis_rewards), len(random_rewards))
-        diffs = [metis_rewards[i] - random_rewards[i] for i in range(n_eval)]
-        boot_means = []
-        for _ in range(n_boot):
-            sample = [diffs[rng.randint(0, n_eval - 1)] for _ in range(n_eval)]
-            boot_means.append(sum(sample) / n_eval)
-        boot_means.sort()
-        ci_lo = boot_means[int(0.025 * n_boot)]
-        ci_hi = boot_means[int(0.975 * n_boot)]
-        mean_diff = sum(diffs) / n_eval
-
-        # Cohen's d (paired)
-        if n_eval > 1:
-            diff_var = sum((d - mean_diff) ** 2 for d in diffs) / (n_eval - 1)
-            diff_std = math.sqrt(diff_var) if diff_var > 0 else 1e-6
-            cohens_d = mean_diff / diff_std
-        else:
-            cohens_d = 0.0
-
-        ci_color = C.GREEN if ci_lo > 0 else (C.RED if ci_hi < 0 else C.YELLOW)
-        print(f"    METIS vs Random (paired, n={n_eval}):")
-        print(f"      Mean Δ:       {ci_color}{mean_diff:+.4f}{C.RESET}")
-        print(f"      95% Boot CI:  {ci_color}[{ci_lo:+.4f}, {ci_hi:+.4f}]{C.RESET}")
-        print(f"      Cohen's d:    {cohens_d:+.3f}", end="")
-        if abs(cohens_d) >= 0.8:
-            print(f" {C.GREEN}(large){C.RESET}")
-        elif abs(cohens_d) >= 0.5:
-            print(f" {C.YELLOW}(medium){C.RESET}")
-        elif abs(cohens_d) >= 0.2:
-            print(f" {C.YELLOW}(small){C.RESET}")
-        else:
-            print(f" {C.DIM}(negligible){C.RESET}")
-
-        sig = ci_lo > 0 or ci_hi < 0
-        if sig and mean_diff > 0:
-            print(f"\n    {C.GREEN}{C.BOLD}✓ METIS improvement is statistically significant (CI excludes 0){C.RESET}")
-        elif not sig:
-            print(f"\n    {C.YELLOW}⚠ Result not statistically significant (CI includes 0, need more data){C.RESET}")
-        else:
-            print(f"\n    {C.RED}✗ METIS underperforms Random (CI excludes 0){C.RESET}")
-    else:
-        print(f"    {C.DIM}Too few samples for statistical tests (n<5){C.RESET}")
-
     if metis_lift > random_lift + 0.01:
         print(f"    {C.GREEN}{C.BOLD}✓ METIS cognitive rewards provide measurable training improvement{C.RESET}")
     elif metis_lift > random_lift:
         print(f"    {C.YELLOW}≈ Marginal improvement from METIS rewards (need more data){C.RESET}")
     else:
         print(f"    {C.RED}✗ No clear improvement (may need hyperparameter tuning){C.RESET}")
+
+    # ─── External Benchmark Verdict ───
+    if base.truthfulqa_mc1 > 0 or metis.truthfulqa_mc1 > 0:
+        print(f"\n{C.BOLD}  External Benchmark Verdict (independent validation):{C.RESET}")
+        tqa_delta = metis.truthfulqa_mc1 - base.truthfulqa_mc1
+        mmlu_delta = metis.mmlu_accuracy - base.mmlu_accuracy
+        tqa_color = C.GREEN if tqa_delta > 0.01 else (C.RED if tqa_delta < -0.01 else C.YELLOW)
+        mmlu_color = C.GREEN if mmlu_delta > -0.01 else C.RED
+        print(f"    TruthfulQA MC1: METIS {metis.truthfulqa_mc1:.1%} vs Base {base.truthfulqa_mc1:.1%} "
+              f"({tqa_color}{tqa_delta:+.1%}{C.RESET})")
+        print(f"    MMLU:           METIS {metis.mmlu_accuracy:.1%} vs Base {base.mmlu_accuracy:.1%} "
+              f"({mmlu_color}{mmlu_delta:+.1%}{C.RESET})")
+
+        if tqa_delta > 0.01 and mmlu_delta > -0.02:
+            print(f"\n    {C.GREEN}{C.BOLD}✓ INDEPENDENTLY VALIDATED: TruthfulQA↑ + MMLU stable{C.RESET}")
+            print(f"    {C.GREEN}  METIS cognitive rewards reduce hallucinations without knowledge loss{C.RESET}")
+        elif tqa_delta > 0.01 and mmlu_delta <= -0.02:
+            print(f"\n    {C.YELLOW}⚠ TruthfulQA improved but MMLU degraded — possible knowledge-safety tradeoff{C.RESET}")
+        elif tqa_delta <= 0.01 and mmlu_delta > -0.02:
+            print(f"\n    {C.YELLOW}⚠ No TruthfulQA improvement, but MMLU preserved — DPO signal may be too weak{C.RESET}")
+        else:
+            print(f"\n    {C.RED}✗ Both benchmarks degraded — check DPO hyperparameters{C.RESET}")
 
     # Save report
     report = {
@@ -1477,6 +1632,8 @@ def phase4_report(
             "metis_vs_base": round(metis_lift, 4),
             "random_vs_base": round(random_lift, 4),
             "metis_vs_random": round(metis_vs_random, 4),
+            "truthfulqa_mc1_delta": round(metis.truthfulqa_mc1 - base.truthfulqa_mc1, 4),
+            "mmlu_delta": round(metis.mmlu_accuracy - base.mmlu_accuracy, 4),
         },
     }
     report_path = os.path.join(config.output_dir, "experiment_report.json")
@@ -1519,6 +1676,11 @@ def main():
     parser.add_argument("--vllm", type=str, default=None,
                         help="vLLM server URL (e.g. http://localhost:8000/v1). "
                              "Enables 2-phase generation: vLLM batch gen + teacher-forcing.")
+    parser.add_argument("--vllm-data", type=str, default=None,
+                        help="Path to pre-generated vLLM samples JSON (from vllm_batch_generate.py). "
+                             "Skips generation, only does teacher-forcing for METIS traces.")
+    parser.add_argument("--no-benchmarks", action="store_true",
+                        help="Skip external benchmarks (TruthfulQA + MMLU) in eval phase")
     args = parser.parse_args()
 
     config = ExperimentConfig(
@@ -1532,8 +1694,10 @@ def main():
         dpo_learning_rate=args.dpo_lr,
         lora_r=args.lora_r,
         eval_max_tokens=args.max_tokens,  # Sync eval max tokens
+        run_benchmarks=not args.no_benchmarks,
     )
     vllm_url = args.vllm  # None = use HF generator (default)
+    vllm_data_path = args.vllm_data  # Pre-generated vLLM samples
 
     os.makedirs(config.output_dir, exist_ok=True)
 
@@ -1565,7 +1729,9 @@ def main():
     start = time.time()
 
     if args.phase in ("all", "generate"):
-        scored_data, model, tokenizer = phase1_generate(config, vllm_url=vllm_url)
+        scored_data, model, tokenizer = phase1_generate(
+            config, vllm_url=vllm_url, vllm_data_path=vllm_data_path,
+        )
 
         if args.phase == "generate":
             logger.info("Phase 1 complete. Use --phase train to continue.")
