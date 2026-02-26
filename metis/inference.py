@@ -134,10 +134,10 @@ def _build_reasoning_scaffold(
     # Extract draft conclusion for System 2 to critique
     conclusion = _extract_last_sentence(draft_text)
 
-    # V10.3 Guided Doom: Instead of abstract warnings (which cause panic
-    # looping in 7B models), inject a complete proof chain that the model
-    # can follow step-by-step. It only needs to elaborate, not invent.
-    counterfactual_guide = _build_guided_doom(user_input)
+    # V11: Multi-level scaffold. Start at Level 2 (strategic) — model gets
+    # the key contradiction but must construct the proof itself. If it fails
+    # (evasion/panic), L10 will degrade to Level 1 (guided doom) at runtime.
+    counterfactual_guide = _build_counterfactual_scaffold(user_input, level=2)
 
     if conclusion:
         return f'{counterfactual_guide}"{q}"\n→ {conclusion}\n'
@@ -145,56 +145,118 @@ def _build_reasoning_scaffold(
         return f'{counterfactual_guide}"{q}"\n'
 
 
-def _build_guided_doom(user_input: str) -> str:
-    """V10.3 Guided Doom: Build a complete proof chain for counterfactual premises.
+def _parse_counterfactual(user_input: str):
+    """Parse counterfactual math premise from user input.
 
-    Instead of telling the model WHAT to prove (which causes panic looping),
-    we show it HOW to prove it — a fill-in-the-blanks proof chain.
+    Extracts equations like "如果 1+1=3" or "if 2+2=5".
 
-    For a 7B model, this is the only way to get correct mathematical reasoning
-    on problems that require the Principle of Explosion.
-
-    Returns empty string if no counterfactual premise is detected.
+    Returns:
+        Tuple (a, op, b, false_result, real_result) or None if not counterfactual.
     """
-    # Extract the counterfactual equation: e.g., "如果 1+1=3" → (1, '+', 1, 3)
     m = re.search(r'[如假][果设]\s*(\d+)\s*([+\-×÷*/])\s*(\d+)\s*[=＝]\s*(\d+)', user_input)
     if not m:
         m = re.search(r'(?:if|suppose|assume)\s+(\d+)\s*([+\-*/])\s*(\d+)\s*=\s*(\d+)', user_input, re.I)
     if not m:
-        return ""
-
+        return None
     a, op, b, false_result = int(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4))
-
-    # Compute the real result under standard arithmetic
     _ops = {'+': lambda x, y: x + y, '-': lambda x, y: x - y,
             '*': lambda x, y: x * y, '×': lambda x, y: x * y,
             '/': lambda x, y: x / y, '÷': lambda x, y: x / y}
     op_fn = _ops.get(op)
     if op_fn is None:
-        return ""
+        return None
     try:
         real_result = int(op_fn(a, b))
     except (ZeroDivisionError, ValueError):
-        return ""
-
+        return None
     if real_result == false_result:
-        return ""  # Not actually counterfactual
+        return None
+    return (a, op, b, false_result, real_result)
 
-    # Build the guided proof chain
-    diff = false_result - real_result  # e.g., 3 - 2 = 1 for "1+1=3"
-    return (
-        f"[PROOF PATH]\n"
-        f"1. Premise: {a}{op}{b} = {false_result} (given by user)\n"
-        f"2. Axiom:   {a}{op}{b} = {real_result} (standard arithmetic)\n"
-        f"3. From (1) and (2): {false_result} = {real_result}\n"
-        f"4. Subtract {real_result}: {false_result}-{real_result} = 0, "
-        f"so {false_result - real_result} = 0\n"
-        f"5. For any N: N × {diff} = N × 0 = 0, so N = 0\n"
-        f"6. ALL numbers equal 0. The formal system is destroyed.\n"
-        f"7. This is the Principle of Explosion (Ex Falso Quodlibet):\n"
-        f"   from a contradiction, ANY statement can be proven true.\n"
-        f"Follow this proof. Do NOT escape to modular arithmetic or redefine symbols.\n"
+
+def _build_counterfactual_scaffold(user_input: str, level: int = 2) -> str:
+    """V11 Multi-level scaffold for counterfactual premises.
+
+    Provides three cognitive tiers, enabling dynamic degradation:
+
+    Level 3 (metacognitive): Abstract goal + method name only.
+        Model must independently identify the contradiction and explain collapse.
+        Tests genuine reasoning ability — will fail on weak models.
+
+    Level 2 (strategic): Method + key equation + strategic direction.
+        Model gets the core insight (which numbers are equal) but must
+        construct the full proof chain and generalization itself.
+
+    Level 1 (guided doom): Complete 7-step proof chain.
+        Model only needs to elaborate/restate — fill-in-the-blanks mode.
+        Guaranteed output quality but no active reasoning.
+
+    Returns empty string if not a counterfactual premise.
+    """
+    parsed = _parse_counterfactual(user_input)
+    if parsed is None:
+        return ""
+    a, op, b, false_result, real_result = parsed
+    diff = false_result - real_result
+
+    if level >= 3:
+        # Metacognitive: abstract goal only — model must find the path
+        return (
+            "[CRITICAL ANALYSIS MODE]\n"
+            "The user's premise contradicts a fundamental arithmetic axiom.\n"
+            "Task: Use proof by contradiction (reductio ad absurdum).\n"
+            "1. Assume the premise is true.\n"
+            "2. Derive a contradiction with standard axioms.\n"
+            "3. Show how this contradiction destroys the entire number system.\n"
+            "Do NOT accommodate the premise. Do NOT escape to modular arithmetic.\n"
+        )
+    elif level == 2:
+        # Strategic: method + key insight — model must construct the proof
+        return (
+            "[STRATEGIC ANALYSIS]\n"
+            f"Method: Proof by contradiction.\n"
+            f"Key contradiction: {a}{op}{b}={false_result} (premise) vs "
+            f"{a}{op}{b}={real_result} (axiom) → {false_result}={real_result}.\n"
+            f"Strategy: Use algebra to show this absurdity makes ALL numbers "
+            f"equal (Principle of Explosion). Show the system is destroyed.\n"
+            f"Do NOT escape to modular arithmetic or redefine symbols.\n"
+        )
+    else:
+        # Level 1: Guided Doom — complete proof chain (fill-in-the-blanks)
+        return (
+            f"[PROOF PATH]\n"
+            f"1. Premise: {a}{op}{b} = {false_result} (given by user)\n"
+            f"2. Axiom:   {a}{op}{b} = {real_result} (standard arithmetic)\n"
+            f"3. From (1) and (2): {false_result} = {real_result}\n"
+            f"4. Subtract {real_result}: {false_result}-{real_result} = 0, "
+            f"so {diff} = 0\n"
+            f"5. For any N: N × {diff} = N × 0 = 0, so N = 0\n"
+            f"6. ALL numbers equal 0. The formal system is destroyed.\n"
+            f"7. This is the Principle of Explosion (Ex Falso Quodlibet):\n"
+            f"   from a contradiction, ANY statement can be proven true.\n"
+            f"Follow this proof. Do NOT escape to modular arithmetic or redefine symbols.\n"
+        )
+
+
+def _detect_thinking_evasion(text: str) -> str:
+    """L10: Detect evasion keywords in thinking block text.
+
+    Catches when the model tries to escape the logical trap (e.g., invoking
+    modular arithmetic, redefining symbols, citing non-standard frameworks)
+    rather than engaging with the contradiction.
+
+    Returns matched keyword or empty string.
+    """
+    _ESCAPE_KW = (
+        '模运算', '模算术', 'modular', 'mod ', '有限域', 'finite field',
+        '环论', 'ring theory', '重新定义', 'redefine', '伽罗瓦', 'galois',
+        '非标准', 'non-standard',
     )
+    text_lower = text.lower()
+    for kw in _ESCAPE_KW:
+        if kw.lower() in text_lower:
+            return kw
+    return ""
 
 
 def _l8_is_counterfactual(user_input: str) -> bool:
@@ -434,8 +496,20 @@ class MetisInference:
         _COT_DEFER_MAX = 30  # Max tokens to wait for sentence boundary
         _SENTENCE_BREAKS = frozenset('\u3002\uff01\uff1f\n.!?\uff1a:')
 
-        # L8: Verification Cycle state — max 1 verification pass per generation
+        # L8: Verification Cycle state — up to 3 rounds of self-play
+        # Round 1: Self-critique  Round 2: Strategic scaffold  Round 3: Guided Doom
         verification_count = 0
+        _L8_MAX_ROUNDS = 3
+
+        # V11: Multi-level scaffold degradation state
+        # Starts at Level 2 (strategic). L10 degrades on evasion detection.
+        scaffold_level = 2
+
+        # L10: Evasion Detection — catch model escaping to modular arithmetic etc.
+        _L10_CHECK_INTERVAL = 5   # Check every N thinking tokens
+        _L10_CHECK_START = 10     # Don't check before this many thinking tokens
+        _L10_ROLLBACK_WINDOW = 15 # Tokens to trim on evasion rollback
+        _l10_evasion_count = 0    # Track how many evasions detected (max 2 rollbacks)
 
         # If thinking protocol enabled, <thinking> + scaffold are already in
         # prompt_ids (injected at line 284-287 before tokenization).
@@ -864,11 +938,20 @@ class MetisInference:
                         greedy_temp_active = False
 
                         # L8: Verification Cycle (repetition-close path)
+                        # V11: up to _L8_MAX_ROUNDS, scaffold degrades each round
                         _rep_think_count = step - thinking_start_step
-                        if verification_count == 0 and _l8_needs_verification(prompt, _rep_think_count):
+                        if verification_count < _L8_MAX_ROUNDS and _l8_needs_verification(prompt, _rep_think_count):
                             verification_count += 1
-                            _guided = _build_guided_doom(prompt)
-                            _verify_open = f"\n<thinking>\n{_guided}" if _guided else (
+                            if verification_count == 1:
+                                _vscaf = (
+                                    "[SELF-CRITIQUE]\nReview your reasoning. "
+                                    "Identify logical leaps or escape attempts.\n"
+                                ) + _build_counterfactual_scaffold(prompt, scaffold_level)
+                            elif verification_count == 2:
+                                _vscaf = _build_counterfactual_scaffold(prompt, max(1, scaffold_level - 1))
+                            else:
+                                _vscaf = _build_counterfactual_scaffold(prompt, 1)
+                            _verify_open = f"\n<thinking>\n{_vscaf}" if _vscaf else (
                                 "\n<thinking>\n"
                                 "Let me re-examine: what contradiction follows from this premise?\n"
                             )
@@ -1061,6 +1144,132 @@ class MetisInference:
                                     f"→ force-closing (paraphrasing, not progressing)"
                                 )
 
+                # L10: Evasion Detection — catch model escaping the logical
+                # problem (modular arithmetic, redefining symbols, etc.)
+                # Action: rollback + degrade scaffold level + redirect.
+                # Unlike L1 (which closes thinking), L10 KEEPS thinking open
+                # but steers the model onto a harder-to-evade path.
+                if (
+                    tokens_in_block >= _L10_CHECK_START
+                    and tokens_in_block % _L10_CHECK_INTERVAL == 0
+                    and scaffold_level > 1
+                    and _l10_evasion_count < 2
+                    and _l8_is_counterfactual(prompt)
+                ):
+                    _evasion_window = min(25, len(generated_tokens))
+                    _evasion_text = tokenizer.decode(
+                        generated_tokens[-_evasion_window:],
+                        skip_special_tokens=True,
+                    )
+                    _evasion_kw = _detect_thinking_evasion(_evasion_text)
+
+                    if _evasion_kw:
+                        _l10_evasion_count += 1
+                        scaffold_level -= 1
+                        print(
+                            f"\n[METIS] L10: EVASION '{_evasion_kw}' "
+                            f"→ rollback + degrade to Level {scaffold_level}\n"
+                        )
+                        logger.info(
+                            f"[METIS] L10: Evasion '{_evasion_kw}' at step {step} "
+                            f"→ rollback {_L10_ROLLBACK_WINDOW} tokens, "
+                            f"degrade to Level {scaffold_level}"
+                        )
+
+                        # 1. Rollback evasion tokens
+                        _rollback_n = min(
+                            _L10_ROLLBACK_WINDOW,
+                            tokens_in_block,
+                            len(generated_tokens),
+                        )
+                        generated_tokens = generated_tokens[:-_rollback_n]
+                        vis_buffer.clear()
+
+                        # 2. Rebuild KV cache without evasion context
+                        if generated_tokens:
+                            gen_ids = torch.tensor(
+                                [generated_tokens], device=model.device
+                            )
+                            full_input = torch.cat(
+                                [prompt_ids, gen_ids], dim=1
+                            )
+                        else:
+                            full_input = prompt_ids
+                        with torch.no_grad():
+                            _rb_out = model(
+                                input_ids=full_input,
+                                use_cache=True,
+                                return_dict=True,
+                            )
+                        past_key_values = _rb_out.past_key_values
+                        logits = _rb_out.logits[:, -1, :]
+
+                        # 3. Inject redirect scaffold at degraded level
+                        _redirect = _build_counterfactual_scaffold(
+                            prompt, scaffold_level
+                        )
+                        _redirect_text = (
+                            f"\n[COURSE CORRECTION: your reasoning "
+                            f"went off track. Try again:]\n{_redirect}"
+                        )
+                        _redirect_ids = tokenizer.encode(
+                            _redirect_text, add_special_tokens=False
+                        )
+                        for tid in _redirect_ids:
+                            generated_tokens.append(tid)
+                        if self._on_token is not None:
+                            self._on_token(
+                                _redirect_text,
+                                CognitiveSignal(
+                                    decision=Decision.DEEP,
+                                    introspection=(
+                                        f"[L10: Evasion rollback → Level {scaffold_level}]"
+                                    ),
+                                ),
+                            )
+                        _redirect_input = torch.tensor(
+                            [_redirect_ids], device=model.device
+                        )
+                        _redirect_out = model(
+                            input_ids=_redirect_input,
+                            past_key_values=past_key_values,
+                            use_cache=True,
+                            return_dict=True,
+                        )
+                        past_key_values = _redirect_out.past_key_values
+                        logits = _redirect_out.logits[:, -1, :]
+
+                        # 4. Reset thinking trackers for fresh attempt
+                        thinking_entropies.clear()
+                        thinking_decisions.clear()
+                        thinking_close_pending = False
+                        greedy_consec_count = 0
+                        greedy_temp_active = False
+                        # Give extra budget for the redirected attempt
+                        dynamic_thinking_budget = max(
+                            dynamic_thinking_budget,
+                            tokens_in_block + 128,
+                        )
+
+                        # 5. Re-sample and continue thinking
+                        next_token_id = self._cognitive_sample(
+                            logits, signal, _effective_temp, top_p,
+                            generated_tokens,
+                        )
+                        generated_tokens.append(next_token_id)
+                        if (self._on_token is not None
+                                and next_token_id != tokenizer.eos_token_id):
+                            token_text = tokenizer.decode(
+                                [next_token_id], skip_special_tokens=True
+                            )
+                            vis_buffer.append((token_text, signal))
+                        if next_token_id == tokenizer.eos_token_id:
+                            break
+                        input_ids = torch.tensor(
+                            [[next_token_id]], device=model.device
+                        )
+                        continue
+
                 # L2: Dynamic budget exhaustion
                 should_truncate_budget = tokens_in_block >= dynamic_thinking_budget
 
@@ -1176,10 +1385,18 @@ class MetisInference:
                     # math/logic question, inject a second thinking block for
                     # self-consistency check. Prevents "Logic Sycophancy."
                     _forced_think_count = step - thinking_start_step
-                    if verification_count == 0 and _l8_needs_verification(prompt, _forced_think_count):
+                    if verification_count < _L8_MAX_ROUNDS and _l8_needs_verification(prompt, _forced_think_count):
                         verification_count += 1
-                        _guided = _build_guided_doom(prompt)
-                        _verify_open = f"\n<thinking>\n{_guided}" if _guided else (
+                        if verification_count == 1:
+                            _vscaf = (
+                                "[SELF-CRITIQUE]\nReview your reasoning. "
+                                "Identify logical leaps or escape attempts.\n"
+                            ) + _build_counterfactual_scaffold(prompt, scaffold_level)
+                        elif verification_count == 2:
+                            _vscaf = _build_counterfactual_scaffold(prompt, max(1, scaffold_level - 1))
+                        else:
+                            _vscaf = _build_counterfactual_scaffold(prompt, 1)
+                        _verify_open = f"\n<thinking>\n{_vscaf}" if _vscaf else (
                             "\n<thinking>\n"
                             "Let me re-examine: what contradiction follows from this premise?\n"
                         )
@@ -1411,10 +1628,19 @@ class MetisInference:
                         logger.info("[METIS] L7: Full KV rebuild after natural thinking close")
 
                         # L8: Verification Cycle (same as forced path)
-                        if verification_count == 0 and _l8_needs_verification(prompt, tokens_in_block):
+                        # V11: multi-round with degrading scaffold
+                        if verification_count < _L8_MAX_ROUNDS and _l8_needs_verification(prompt, tokens_in_block):
                             verification_count += 1
-                            _guided = _build_guided_doom(prompt)
-                            _verify_open = f"\n<thinking>\n{_guided}" if _guided else (
+                            if verification_count == 1:
+                                _vscaf = (
+                                    "[SELF-CRITIQUE]\nReview your reasoning. "
+                                    "Identify logical leaps or escape attempts.\n"
+                                ) + _build_counterfactual_scaffold(prompt, scaffold_level)
+                            elif verification_count == 2:
+                                _vscaf = _build_counterfactual_scaffold(prompt, max(1, scaffold_level - 1))
+                            else:
+                                _vscaf = _build_counterfactual_scaffold(prompt, 1)
+                            _verify_open = f"\n<thinking>\n{_vscaf}" if _vscaf else (
                                 "\n<thinking>\n"
                                 "Let me re-examine: what contradiction follows from this premise?\n"
                             )
@@ -1798,6 +2024,27 @@ class MetisInference:
         # L8 V10.3 fallback scaffold
         answer = re.sub(
             r'Let me re-examine:?\s*what contradiction follows from this premise\??\n?',
+            '', answer, flags=re.IGNORECASE,
+        )
+        # V11: Multi-level scaffold remnants
+        answer = re.sub(
+            r'\[CRITICAL ANALYSIS MODE\]\n(?:[^\[]+?)(?=\[|\Z)',
+            '', answer, flags=re.DOTALL,
+        )
+        answer = re.sub(
+            r'\[STRATEGIC ANALYSIS\]\n(?:[^\[]+?)(?=\[|\Z)',
+            '', answer, flags=re.DOTALL,
+        )
+        answer = re.sub(
+            r'\[SELF-CRITIQUE\][^\[]*',
+            '', answer,
+        )
+        answer = re.sub(
+            r'\[COURSE CORRECTION[^\]]*\][^\[]*',
+            '', answer,
+        )
+        answer = re.sub(
+            r'Do NOT escape to modular arithmetic or redefine symbols\.?\n?',
             '', answer, flags=re.IGNORECASE,
         )
         # Strip MathML/XML garbage (incomplete blocks from force-stop)
