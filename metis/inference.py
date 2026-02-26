@@ -537,7 +537,54 @@ class MetisInference:
             signal = self._metis.step(logits)
             signals.append(signal)
 
-            # --- G3: Dynamic Thinking Trigger (deferred to sentence boundary) ---
+            # ─── System 1 to System 2 Bridge (EGTS Fallback) ───
+            if enable_system2 and not is_thinking and signal.cusum_alarm:
+                logger.info(f"[METIS] System 1 CUSUM Alarm at step {step}. Handing over to System 2 (EGTS)...")
+                
+                # 1. Flush visualizer buffer
+                if self._on_token is not None and vis_buffer:
+                    for v_text, v_sig in vis_buffer:
+                        self._on_token(v_text, v_sig)
+                    vis_buffer.clear()
+                
+                # 2. Run Entropy-Guided Tree Search from current prefix
+                prefix_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+                full_prompt = prompt + "\n" + prefix_text if prefix_text else prompt
+                
+                # 3. Configure deep search budget
+                from metis.search.tree_node import SearchConfig
+                search_cfg = SearchConfig(
+                    beam_width=8,
+                    max_depth=128,
+                    max_nodes=512,
+                )
+                
+                search_result = self.search_generate(
+                    prompt=full_prompt,
+                    max_tokens=search_cfg.max_depth,
+                    chat_template=False,  # Already formatted
+                    search_config=search_cfg,
+                    enable_counterfactual=True,
+                )
+                
+                # 4. Append search result to current generation
+                if search_result.tokens_generated > 0:
+                    generated_tokens.extend(search_result.tokens)
+                    
+                    if self._on_token is not None:
+                        # Yield search result as a single chunk to the UI
+                        self._on_token(
+                            search_result.text,
+                            CognitiveSignal(
+                                decision=Decision.DEEP,
+                                introspection=search_result.introspection,
+                                semantic_entropy=search_result.avg_token_entropy,
+                            )
+                        )
+                
+                # 5. EGTS reached EOS or max_depth. Either way, we stop here.
+                break
+            # ───────────────────────────────────────────────────
             # CUSUM detects sustained difficulty, but injection waits for a
             # natural sentence break so the model enters thinking from a
             # coherent context — not mid-sentence.
