@@ -2,9 +2,6 @@
 data/
 !data/golden_anchor.jsonl
 *.json
-!sedac/v9/production/config.json
-!dashboard/package.json
-!dashboard/tsconfig.json
 
 # Cache
 cache/
@@ -53,8 +50,13 @@ debug_*.py
 # V9 experimental (not ready for release)
 metis/v9/
 
-# Local dev guides
-docs/WSL2_VLLM_SETUP.md
+# Development directories (not part of arXiv submission)
+dashboard/
+dgx/
+monitor/
+configs/
+docs/
+night_dreams/
 
 # Local benchmarks
 benchmark_*.py
@@ -96,10 +98,39 @@ metis/_native/target/
 # External plugins
 skills/
 
-# Dashboard build artifacts
-dashboard/node_modules/
-dashboard/.next/
-dashboard/out/
+# Root-level dev scripts
+bench_native.py
+dashboard.py
+demo_*.py
+fetch_*.py
+format_*.py
+prepare_*.py
+report_*.py
+resume_*.py
+run_experiment.py
+test_inference.py
+test_metacognitive.py
+test_native.py
+test_sedac_*.py
+vllm_*.py
+vllm_*.sh
+restart_*.sh
+run_assimilated_*.sh
+run_eval_only.sh
+run_external_*.sh
+run_full_*.sh
+run_restructured_*.sh
+start_all.sh
+wait_*.sh
+
+# Dev markdown
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md
+DGX_*.md
+DPO_*.md
+REPRODUCIBILITY.md
 
 # Old package (migrated to metis/)
 sedac/
