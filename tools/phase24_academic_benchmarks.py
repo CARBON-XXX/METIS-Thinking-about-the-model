@@ -89,6 +89,100 @@ def check_qa_answer(response: str, gold: str) -> bool:
     return gold.strip().lower() in response.lower()
 
 
+def normalize_answer(text: str, qtype: str) -> str:
+    """Extract and normalize a canonical short answer from a CoT completion.
+
+    For math: extract last number, normalize float→int where possible.
+    For QA: extract the core answer phrase, lowercase, strip articles/punctuation.
+    """
+    # Try numeric extraction first (works for both math and numeric QA)
+    num = extract_last_number(text)
+    if qtype == "math" and num is not None:
+        # Normalize: 12.0 → "12", 3.14 → "3.14"
+        return str(int(num)) if num == int(num) else str(num)
+
+    # For QA: try to extract a short answer from common patterns
+    lower = text.lower().strip()
+
+    # Pattern 1: "the answer is X" / "answer: X"
+    for pat in [
+        r"(?:the\s+)?(?:final\s+)?answer\s*(?:is|:)\s*[\"\']?(.+?)[\"\'\.]?\s*$",
+        r"(?:therefore|thus|so|hence)[,:]?\s+(?:the\s+)?(?:answer\s+is\s+)?(.+?)[\.\!]?\s*$",
+    ]:
+        m = re.search(pat, lower, re.MULTILINE)
+        if m:
+            candidate = m.group(1).strip().rstrip(".!,;")
+            if 1 <= len(candidate) <= 80:
+                return _strip_articles(candidate)
+
+    # Pattern 2: last non-empty line (models often put answer at the end)
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    if lines:
+        last = lines[-1].lower().rstrip(".!,;:")
+        # If last line is short, use it as the answer
+        if len(last) <= 60:
+            return _strip_articles(last)
+
+    # Fallback: if numeric answer found, use it even for QA
+    if num is not None:
+        return str(int(num)) if num == int(num) else str(num)
+
+    # Last resort: first 60 chars, normalized
+    return _strip_articles(lower[:60])
+
+
+def _strip_articles(text: str) -> str:
+    """Remove leading articles and normalize whitespace for answer comparison."""
+    text = re.sub(r"^(the|a|an|it\'s|it is|its|they are|this is)\s+", "", text.strip())
+    text = re.sub(r"[^a-z0-9\s\.\-\/]", "", text)  # keep alphanumeric + basic punct
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def semantic_majority_vote(
+    completions: List[str], qtype: str, gold: str,
+) -> Tuple[str, bool]:
+    """Semantic equivalence clustering for self-consistency majority vote.
+
+    1. Normalize each completion to a canonical answer.
+    2. Cluster by exact match on normalized form.
+    3. Additionally merge clusters where one is a substring of another.
+    4. Vote on the largest cluster.
+    5. Check the winning answer against gold.
+
+    Returns (winning_answer, is_correct).
+    """
+    normed = [normalize_answer(c, qtype) for c in completions]
+
+    # Substring-based merging: if answer A contains answer B, merge B→A
+    canonical = list(normed)  # mutable copy
+    for i in range(len(canonical)):
+        for j in range(len(canonical)):
+            if i != j and canonical[j] in canonical[i] and len(canonical[j]) < len(canonical[i]):
+                # Shorter is substring of longer — merge shorter to longer
+                canonical[j] = canonical[i]
+            elif i != j and canonical[i] in canonical[j] and len(canonical[i]) < len(canonical[j]):
+                canonical[i] = canonical[j]
+
+    # Vote on canonical forms
+    vote_result = Counter(canonical).most_common(1)
+    winner = vote_result[0][0] if vote_result else ""
+
+    # Check against gold
+    if qtype == "math":
+        ok = check_math_answer(winner, gold)
+    else:
+        # Check both directions: gold in winner OR winner contains gold
+        gold_norm = _strip_articles(gold.strip().lower())
+        ok = (gold_norm in winner) or (winner in gold_norm and len(winner) > 1)
+        # Also check any original completion that mapped to the winner
+        if not ok:
+            for orig, canon in zip(completions, canonical):
+                if canon == winner and check_qa_answer(orig, gold):
+                    ok = True
+                    break
+    return winner, ok
+
+
 def count_tokens_approx(text: str) -> int:
     """Approximate token count (words * 1.3 heuristic)."""
     return max(1, int(len(text.split()) * 1.3))
@@ -642,13 +736,11 @@ def vector_2_pareto(model_path: str, skip_gpu: bool = False) -> Dict[str, Any]:
     s3_t = time.time() - t0
     s3_c, s3_tok = 0, 0
     for o, it in zip(s3_out, dataset):
-        answers: List[str] = []
+        completions: List[str] = []
         for comp in o.outputs:
             s3_tok += len(comp.token_ids)
-            num = extract_last_number(comp.text)
-            answers.append(str(num) if num is not None else comp.text.strip()[:100])
-        vote = Counter(answers).most_common(1)[0][0] if answers else ""
-        ok = check_math_answer(vote, it["answer"]) if it["type"] == "math" else check_qa_answer(vote, it["answer"])
+            completions.append(comp.text)
+        _, ok = semantic_majority_vote(completions, it["type"], it["answer"])
         s3_c += int(ok)
     results["strategies"]["self_consistency_k5"] = {
         "accuracy": round(s3_c / len(dataset), 4), "correct": s3_c,

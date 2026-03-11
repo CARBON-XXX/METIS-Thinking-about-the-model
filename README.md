@@ -46,7 +46,7 @@ METIS dynamically routes each LLM query through difficulty-appropriate computati
 |:---|:---:|:---:|:---:|:---:|
 | Zero-Shot | 90% | 12.4 | 24.3s | 51.1 tok/s |
 | Forced CoT | 91% | 156.0 | 118.3s | 131.9 tok/s |
-| Self-Consistency (k=5) | 64% | 844.5 | 322.2s | 262.1 tok/s |
+| Self-Consistency (k=5) | 94% | 864.5 | 313.9s | 275.4 tok/s |
 | **METIS Dynamic** | **96%** | **53.4** | **51.2s** | **104.3 tok/s** |
 
 METIS achieves the highest accuracy at 4.3x fewer tokens than Forced CoT and 15.8x fewer than Self-Consistency.
