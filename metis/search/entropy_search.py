@@ -32,7 +32,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -322,7 +322,7 @@ class EntropyGuidedSearch:
         # Generate full input for this node's position
         path_tokens = node.get_path_tokens()
         if path_tokens:
-            path_tensor = torch.tensor([path_tokens[-1:]], device=self._device)
+            path_tensor = torch.tensor([[path_tokens[-1]]], device=self._device)
         else:
             path_tensor = None
 

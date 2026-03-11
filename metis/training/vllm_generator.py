@@ -19,7 +19,6 @@ Usage:
 from __future__ import annotations
 
 import gc
-import json
 import logging
 import math
 import time

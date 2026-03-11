@@ -18,7 +18,7 @@ Core metric computation (all based on real observations, no simulated values):
 from __future__ import annotations
 
 import math
-from typing import Optional, List, Dict
+from typing import Optional, Dict
 from collections import Counter
 
 from ..core.types import (
@@ -469,3 +469,235 @@ class MetacognitiveCore:
             f"Risk gap {risk_gap:+.2f}, Stable"
         )
         return "continue", "; ".join(parts)
+
+
+# ═══════════════════════════════════════════════════════════
+# Phase 14: Metacognitive Orchestrator — Gateway Hardening
+# ═══════════════════════════════════════════════════════════
+# Phase 12: Probe → Generate  [REPLACED]
+# Phase 13: Generate → lazy Probe  [FAILED: still +357% tokens, -16% acc]
+# Phase 14: Absolute Short-Circuit.
+#   - FAST / FAST (Implicit) → return IMMEDIATELY. Zero extra work.
+#   - DEEP → lazy-instantiate probe, run it, decide.
+#   - Probe is NEVER created for FAST queries.
+
+import logging as _logging
+import re as _re
+import time as _time
+from dataclasses import dataclass as _dataclass, field as _field
+from typing import Any as _Any, Optional as _Optional
+
+_orch_log = _logging.getLogger(__name__ + ".orchestrator")
+
+
+@_dataclass
+class MetisResponse:
+    """Unified response from the Metacognitive Orchestrator."""
+    final_answer: str = ""
+    thinking_text: str = ""
+    cognitive_route: str = ""
+    semantic_entropy: _Optional[float] = None   # None = probe never ran
+    epistemic_state: str = ""
+    n_clusters: int = 0
+    cluster_sizes: list = _field(default_factory=list)
+    searched: bool = False
+    search_query: str = ""
+    retrieved_context: str = ""
+    thinking_repaired: bool = False
+    tokens_generated: int = 0
+    latency_ms: float = 0.0
+    trajectory: str = ""
+    raw_output: str = ""                         # full raw model output
+
+
+class MetacognitiveOrchestrator:
+    """Phase 14 — Gateway-Hardened Metacognitive Orchestrator.
+
+    Architecture::
+
+        process_query(prompt)
+          ├─ generate_cognitive(prompt)          # single forward pass
+          ├─ if FAST / FAST (Implicit):
+          │     RETURN immediately               # absolute short-circuit
+          └─ elif DEEP:
+                ├─ SemanticBoundaryProbe          # lazy-instantiated HERE
+                ├─ if UNKNOWN+Factual → search
+                └─ else → return original DEEP
+    """
+
+    def __init__(
+        self,
+        metis: _Any,
+        n_probe_samples: int = 5,
+        probe_temperature: float = 1.0,
+        entropy_threshold: float = 0.8,
+        retriever: _Any = None,
+    ):
+        from ..inference import MetisInference
+
+        self._metis = metis
+        self._engine = MetisInference(metis)
+
+        # ── Probe is NOT created here. Lazy init on first DEEP hit. ──
+        self._probe = None               # type: ignore[assignment]
+        self._probe_cfg = {
+            "n_samples": n_probe_samples,
+            "temperature": probe_temperature,
+            "threshold": entropy_threshold,
+        }
+        self._curiosity = None            # lazy
+        self._retriever = retriever       # may be None
+        self._threshold = entropy_threshold
+
+    def _ensure_probe(self) -> None:
+        """Lazy-instantiate the SemanticBoundaryProbe (first DEEP only)."""
+        if self._probe is not None:
+            return
+        from .boundary import SemanticBoundaryProbe
+        from .curiosity import CuriosityDriver
+        from ..search.retriever import ToolRetriever
+
+        _orch_log.info("  [Lazy Init] Creating SemanticBoundaryProbe + CuriosityDriver")
+        self._probe = SemanticBoundaryProbe(
+            self._metis, **self._probe_cfg,
+        )
+        self._curiosity = CuriosityDriver()
+        if self._retriever is None:
+            self._retriever = ToolRetriever()
+
+    # Heuristic: detect math/logic/reasoning queries where web search is useless.
+    _REASONING_PATTERNS = _re.compile(
+        r'(?i)'
+        r'(?:solve|calculate|compute|simplify|evaluate|find\s+(?:x|y|z|the\s+value))'
+        r'|(?:how\s+many|how\s+much|how\s+long|how\s+far|how\s+fast|how\s+old)'
+        r'|(?:what\s+is\s+\d)'
+        r'|(?:\d\s*[+\-*/^]\s*\d)'
+        r'|(?:equation|integral|derivative|probability|percent|ratio)'
+        r'|(?:if\s+.+(?:then|how|what|find))'
+        r'|(?:\$|€|£)\s*\d'
+        r'|(?:total|sum|difference|product|quotient)'
+        r'|(?:per\s+(?:hour|day|week|month|year|minute|second|gallon|liter|pound|kg))'
+        r'|(?:mph|km/h|m/s|feet\s+per)'
+        r'|(?:each\s+(?:cost|worth|weigh|pay))'
+        r'|(?:\d+\s*(?:times|more\s+than|less\s+than|fewer\s+than))'
+    )
+
+    @staticmethod
+    def _is_reasoning_query(prompt: str) -> bool:
+        """Detect math/logic queries where web search adds no value."""
+        return bool(MetacognitiveOrchestrator._REASONING_PATTERNS.search(prompt))
+
+    # ──────────────────────────────────────────────────────────
+    # process_query — THE critical path
+    # ──────────────────────────────────────────────────────────
+
+    def process_query(self, prompt: str) -> MetisResponse:
+        """Phase 14 — Absolute Short-Circuit Gateway.
+
+        STEP 1: ``generate_cognitive(prompt)`` — single forward pass.
+        STEP 2: Read ``cognitive_route`` from the DPO model's own tags.
+
+        **If FAST or FAST (Implicit):**
+            RETURN IMMEDIATELY. No probe. No curiosity. No search.
+            ``semantic_entropy`` is ``None`` (probe never ran).
+
+        **Elif DEEP:**
+            Lazy-init the probe → evaluate → search if needed.
+        """
+        t0 = _time.perf_counter()
+
+        # ── Step 1: Single forward pass ──
+        _orch_log.info(f"[Generate] \"{prompt[:80]}\"")
+        result = self._engine.generate_cognitive(prompt, max_new_tokens=1024)
+        route = result.cognitive_route
+        _orch_log.info(f"  Route={route}, tokens={result.tokens_generated}")
+
+        # ══════════════════════════════════════════════════════
+        # ABSOLUTE SHORT-CIRCUIT: FAST routes
+        # ══════════════════════════════════════════════════════
+        if route in ("FAST", "FAST (Implicit)"):
+            total_ms = (_time.perf_counter() - t0) * 1000
+            _orch_log.info(
+                f"  → SHORT-CIRCUIT {route}: returning in {total_ms:.0f}ms "
+                f"(probe=NEVER, search=NEVER)"
+            )
+            return MetisResponse(
+                final_answer=result.text,
+                thinking_text=result.thinking_text or "",
+                cognitive_route=route,
+                semantic_entropy=None,          # probe never ran
+                epistemic_state="short_circuit",
+                searched=False,
+                thinking_repaired=result.thinking_repaired,
+                tokens_generated=result.tokens_generated,
+                latency_ms=total_ms,
+                trajectory=f"FAST→SHORT_CIRCUIT({total_ms:.0f}ms)",
+                raw_output=result.raw_output or "",
+            )
+            # ↑↑↑ NOTHING ELSE EXECUTES FOR FAST ↑↑↑
+
+        # ══════════════════════════════════════════════════════
+        # DEEP route — epistemic evaluation zone
+        # ══════════════════════════════════════════════════════
+        self._ensure_probe()    # lazy-create probe on first DEEP
+
+        _orch_log.info("  → DEEP: running SemanticBoundaryProbe...")
+        probe_result = self._probe.evaluate_uncertainty(prompt)
+        entropy = probe_result.semantic_entropy
+        state = probe_result.epistemic_state
+        _orch_log.info(
+            f"  H={entropy:.4f}, clusters={probe_result.n_clusters}, "
+            f"state={state.value}"
+        )
+
+        is_reasoning = self._is_reasoning_query(prompt)
+
+        if state == EpistemicState.UNKNOWN and not is_reasoning:
+            _orch_log.info("  → UNKNOWN+Factual: CuriosityDriver.resolve_gap()")
+            resolution = self._curiosity.resolve_gap(
+                prompt=prompt,
+                probe_result=probe_result,
+                engine=self._engine,
+                retriever=self._retriever,
+            )
+            grounded = resolution["result"]
+            total_ms = (_time.perf_counter() - t0) * 1000
+            return MetisResponse(
+                final_answer=grounded.text,
+                thinking_text=grounded.thinking_text or "",
+                cognitive_route=grounded.cognitive_route,
+                semantic_entropy=entropy,
+                epistemic_state=state.value,
+                n_clusters=probe_result.n_clusters,
+                cluster_sizes=probe_result.cluster_sizes,
+                searched=True,
+                search_query=resolution["search_query"],
+                retrieved_context=resolution["retrieved_context"],
+                thinking_repaired=grounded.thinking_repaired,
+                tokens_generated=grounded.tokens_generated,
+                latency_ms=total_ms,
+                trajectory=(
+                    f"DEEP→Probe(H={entropy:.2f},UNKNOWN)→"
+                    f"Search(\"{resolution['search_query']}\")"
+                ),
+                raw_output=grounded.raw_output or "",
+            )
+
+        # DEEP + KNOWN/LIKELY or DEEP + UNKNOWN+Reasoning → original result
+        total_ms = (_time.perf_counter() - t0) * 1000
+        _orch_log.info(f"  → Returning original DEEP result ({total_ms:.0f}ms)")
+        return MetisResponse(
+            final_answer=result.text,
+            thinking_text=result.thinking_text or "",
+            cognitive_route=route,
+            semantic_entropy=entropy,
+            epistemic_state=state.value,
+            n_clusters=probe_result.n_clusters,
+            cluster_sizes=probe_result.cluster_sizes,
+            searched=False,
+            thinking_repaired=result.thinking_repaired,
+            tokens_generated=result.tokens_generated,
+            latency_ms=total_ms,
+            trajectory=f"DEEP→Probe(H={entropy:.2f},{state.value})→Confirmed",
+            raw_output=result.raw_output or "",
+        )

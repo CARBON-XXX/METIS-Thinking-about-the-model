@@ -8,7 +8,7 @@ System 2 (slow thinking): high entropy → logic, reasoning, high cost
 Without this mechanism, AGI is like someone who chatters endlessly but never thinks deeply.
 With it, AGI knows when to speak automatically and when to think carefully.
 """
-from typing import Optional, Dict
+from typing import Dict
 import collections
 
 from ..core.types import Decision, CognitiveSignal, SwitchResult, CoTStrategy

@@ -18,11 +18,22 @@ use std::collections::HashMap;
 // Avoids PyO3 boundary crossing overhead on every stats call
 // ─────────────────────────────────────────────────────────
 
+// Phase 18: Hybrid O(1)/O(N) — same architecture as SlidingWindowStats in lib.rs.
+// Mean/Var: O(1) Welford incremental. Skew/Kurt: periodic O(N) recalibration.
+const INTERNAL_CAL_INTERVAL: usize = 100;
+
 struct InternalWindow {
     buf: Vec<f64>,
     head: usize,
     len: usize,
     cap: usize,
+    // ── O(1) incremental accumulators ──
+    running_sum: f64,
+    running_sum_sq: f64,
+    // ── Periodic O(N) cache ──
+    cached_skew: f64,
+    cached_kurt: f64,
+    steps_since_cal: usize,
 }
 
 impl InternalWindow {
@@ -32,17 +43,52 @@ impl InternalWindow {
             head: 0,
             len: 0,
             cap,
+            running_sum: 0.0,
+            running_sum_sq: 0.0,
+            cached_skew: 0.0,
+            cached_kurt: 0.0,
+            steps_since_cal: 0,
         }
     }
 
     fn push(&mut self, x: f64) {
         if self.len < self.cap {
+            // Growing phase
+            let old_mean = if self.len > 0 {
+                self.running_sum / self.len as f64
+            } else {
+                0.0
+            };
             self.buf.push(x);
             self.len += 1;
+            self.running_sum += x;
+            let new_mean = self.running_sum / self.len as f64;
+            self.running_sum_sq += (x - old_mean) * (x - new_mean);
             self.head = self.len % self.cap;
         } else {
+            // Sliding phase
+            let old_val = self.buf[self.head];
+            let old_mean = self.running_sum / self.len as f64;
+
+            self.running_sum -= old_val;
+            let interim_mean = self.running_sum / self.len as f64;
+            self.running_sum_sq -= (old_val - old_mean) * (old_val - interim_mean);
+
+            self.running_sum += x;
+            let new_mean = self.running_sum / self.len as f64;
+            self.running_sum_sq += (x - interim_mean) * (x - new_mean);
+
+            if self.running_sum_sq < 0.0 {
+                self.running_sum_sq = 0.0;
+            }
+
             self.buf[self.head] = x;
             self.head = (self.head + 1) % self.cap;
+        }
+
+        self.steps_since_cal += 1;
+        if self.steps_since_cal >= INTERNAL_CAL_INTERVAL {
+            self.recalibrate();
         }
     }
 
@@ -50,21 +96,20 @@ impl InternalWindow {
         self.len
     }
 
+    /// O(1) mean.
     fn mean(&self) -> f64 {
         if self.len == 0 {
             return 0.0;
         }
-        self.buf[..self.len].iter().sum::<f64>() / self.len as f64
+        self.running_sum / self.len as f64
     }
 
+    /// O(1) std with Bessel correction.
     fn std_bessel(&self) -> f64 {
         if self.len < 2 {
             return 0.1;
         }
-        let n = self.len as f64;
-        let m = self.mean();
-        let m2: f64 = self.buf[..self.len].iter().map(|&x| (x - m) * (x - m)).sum();
-        let var = m2 / (n - 1.0);
+        let var = self.running_sum_sq / (self.len as f64 - 1.0);
         if var > 1e-10 {
             var.sqrt()
         } else {
@@ -72,15 +117,43 @@ impl InternalWindow {
         }
     }
 
-    /// Returns (mean, std, skew, kurt, n) — single-pass two-pass algorithm.
+    /// Returns (mean, std, skew, kurt, n) — O(1) for mean/std, cached for skew/kurt.
     fn full_stats(&self) -> (f64, f64, f64, f64, usize) {
         let n = self.len;
         if n < 2 {
             return (0.0, 0.1, 0.0, 0.0, n);
         }
+        let mean_val = self.running_sum / n as f64;
+        let var = self.running_sum_sq / (n as f64 - 1.0);
+        let std_val = if var > 1e-10 { var.sqrt() } else { 0.01 };
+        (mean_val, std_val, self.cached_skew, self.cached_kurt, n)
+    }
+
+    fn reset(&mut self) {
+        self.buf.clear();
+        self.head = 0;
+        self.len = 0;
+        self.running_sum = 0.0;
+        self.running_sum_sq = 0.0;
+        self.cached_skew = 0.0;
+        self.cached_kurt = 0.0;
+        self.steps_since_cal = 0;
+    }
+
+    /// O(N) recalibration — corrects drift + recomputes skew/kurt.
+    fn recalibrate(&mut self) {
+        self.steps_since_cal = 0;
+        let n = self.len;
+        if n < 3 {
+            self.cached_skew = 0.0;
+            self.cached_kurt = 0.0;
+            return;
+        }
+
         let nf = n as f64;
         let data = &self.buf[..n];
-        let mean = data.iter().sum::<f64>() / nf;
+        let mean: f64 = data.iter().sum::<f64>() / nf;
+        self.running_sum = mean * nf;
 
         let (mut m2, mut m3, mut m4) = (0.0f64, 0.0f64, 0.0f64);
         for &x in data {
@@ -91,43 +164,26 @@ impl InternalWindow {
             m4 += d2 * d2;
         }
 
-        // Std (Bessel correction)
-        let var = m2 / (nf - 1.0);
-        let std_val = if var > 1e-10 { var.sqrt() } else { 0.01 };
+        self.running_sum_sq = m2;
 
-        // Population std for moment standardization
         let std_pop = {
             let v = m2 / nf;
-            if v > 0.0 {
-                v.sqrt()
-            } else {
-                0.01
-            }
+            if v > 0.0 { v.sqrt() } else { 0.01 }
         };
 
-        // Skewness (Fisher-Pearson, bias-corrected)
-        let skew = if n >= 3 && std_pop > 1e-6 {
+        self.cached_skew = if n >= 3 && std_pop > 1e-6 {
             let g1 = (m3 / nf) / std_pop.powi(3);
             g1 * (nf * (nf - 1.0)).sqrt() / (nf - 2.0)
         } else {
             0.0
         };
 
-        // Kurtosis (Fisher excess, bias-corrected)
-        let kurt = if n >= 4 && std_pop > 1e-6 {
+        self.cached_kurt = if n >= 4 && std_pop > 1e-6 {
             let g2 = (m4 / nf) / std_pop.powi(4) - 3.0;
             ((nf + 1.0) * g2 + 6.0) * (nf - 1.0) / ((nf - 2.0) * (nf - 3.0))
         } else {
             0.0
         };
-
-        (mean, std_val, skew, kurt, n)
-    }
-
-    fn reset(&mut self) {
-        self.buf.clear();
-        self.head = 0;
-        self.len = 0;
     }
 }
 

@@ -154,7 +154,7 @@ if _HAS_LANGCHAIN:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
             from ..metis import Metis
-            from ..inference import MetisInferenceEngine
+            from ..inference import MetisInference
 
             device = self.device
             if device == "auto":
@@ -176,7 +176,7 @@ if _HAS_LANGCHAIN:
             self._model.eval()
 
             self._metis = Metis.attach(self._model, self._tokenizer)
-            self._inference = MetisInferenceEngine(self._metis)
+            self._inference = MetisInference(self._metis)
 
         def _generate(
             self,
@@ -190,22 +190,19 @@ if _HAS_LANGCHAIN:
 
             generations: List[List[Generation]] = []
             for prompt in prompts:
-                result = self._inference.generate(
+                result = self._inference.generate_cognitive(
                     prompt,
-                    max_tokens=kwargs.get("max_tokens", self.max_tokens),
-                    temperature=kwargs.get("temperature", self.temperature),
+                    max_new_tokens=kwargs.get("max_tokens", self.max_tokens),
                 )
 
-                judgment = self._metis.introspect()
                 meta = {
-                    "epistemic_confidence": judgment.epistemic_confidence,
-                    "cognitive_load": judgment.cognitive_load,
-                    "hallucination_risk": judgment.hallucination_risk,
-                    "suggested_action": judgment.suggested_action,
-                    "boundary_status": judgment.boundary_status,
-                    "dominant_state": judgment.dominant_state.value
-                    if hasattr(judgment.dominant_state, "value")
-                    else str(judgment.dominant_state),
+                    "cognitive_route": result.cognitive_route,
+                    "tokens_generated": result.tokens_generated,
+                    "latency_ms": result.latency_ms,
+                    "thinking_repaired": result.thinking_repaired,
+                    "final_decision": result.final_decision.value
+                    if hasattr(result.final_decision, "value")
+                    else str(result.final_decision),
                 }
 
                 gen = Generation(

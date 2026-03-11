@@ -1,6 +1,23 @@
 """
-METIS Inference Pipeline
-Cognitive-aware inference pipeline — signal consumer
+METIS Inference Pipeline — Cognitive-Aware Generation Engine
+
+Two execution modes:
+  1. generate()           — Token-by-token with real-time cognitive monitoring.
+                            Feeds each token through Metis.step() producing
+                            CognitiveSignal (entropy, decision, boundary action).
+                            Supports inline RAG injection on BoundaryAction.SEEK
+                            via RAGAdapter (Inline Append with KV cache rebuild).
+
+  2. generate_cognitive()  — Single-pass HF generate() for DPO-trained models that
+                            emit <thinking>...</thinking> blocks natively.
+                            Deterministic state-machine parser extracts cognitive
+                            route (DEEP / FAST / FAST-Implicit).
+
+Architecture (Phase 21):
+  - Rust-accelerated repetition detection (Jaccard + positional fuzzy)
+  - Hybrid Welford O(1) running statistics via metis_native
+  - Degradation Sentinel post-training regression gate
+  - SignalBridge broadcast on generate_cognitive() completion
 
 Usage:
     from metis import Metis, MetisInference
@@ -8,6 +25,7 @@ Usage:
     metis = Metis.attach(model, tokenizer)
     engine = MetisInference(metis)
     result = engine.generate("What is the capital of France?")
+    result = engine.generate_cognitive("Prove that √2 is irrational.")
 """
 from __future__ import annotations
 
@@ -16,7 +34,6 @@ import time
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -155,6 +172,9 @@ class MetisInference:
         # Callbacks
         on_seek: Optional[Callable[[str, str], Optional[str]]] = None,
         on_token: Optional[Callable[[str, 'CognitiveSignal'], None]] = None,
+        # Phase 18: Inline RAG adapter for BoundaryAction.SEEK
+        rag_adapter: Optional[object] = None,
+        max_rag_injections: int = 2,
     ):
         """
         Args:
@@ -170,6 +190,8 @@ class MetisInference:
             refuse_consecutive_threshold: Consecutive REFUSE count needed after grace period
             on_seek: External retrieval callback fn(query, context) -> Optional[extra_info]
             on_token: Streaming callback fn(token_text, signal) -- called per token
+            rag_adapter: RAGAdapter instance for inline context injection on SEEK
+            max_rag_injections: Max RAG injections per generation (prevent infinite loops)
         """
         self._metis = metis
         self._system2_deep_ratio = system2_deep_ratio
@@ -183,6 +205,8 @@ class MetisInference:
         self._max_thinking_tokens = max_thinking_tokens
         self._on_seek = on_seek
         self._on_token = on_token
+        self._rag_adapter = rag_adapter
+        self._max_rag_injections = max_rag_injections
 
     @torch.no_grad()
     def generate(
@@ -258,6 +282,7 @@ class MetisInference:
         vis_buffer: List[Tuple[str, CognitiveSignal]] = []
         signals: List[CognitiveSignal] = []
         boundary_interventions = 0
+        rag_injection_count = 0
         was_refused = False
         consecutive_refuse = 0
         seek_results: List[str] = []
@@ -428,11 +453,87 @@ class MetisInference:
 
             if signal.boundary_action == BoundaryAction.SEEK:
                 boundary_interventions += 1
+
+                # Legacy callback (backward-compat)
                 if self._on_seek is not None:
                     context = tokenizer.decode(generated_tokens, skip_special_tokens=True)
                     extra = self._on_seek(prompt, context)
                     if extra:
                         seek_results.append(extra)
+
+                # ── Phase 18: Active RAG injection ──
+                if (self._rag_adapter is not None
+                        and rag_injection_count < self._max_rag_injections):
+                    rag_injection_count += 1
+                    gen_text = tokenizer.decode(
+                        generated_tokens, skip_special_tokens=True
+                    )
+                    topic = self._rag_adapter.extract_topic(prompt, gen_text)
+                    injection = self._rag_adapter.search_and_format(topic)
+
+                    if injection:
+                        seek_results.append(injection)
+                        # Tokenize injection text
+                        inj_ids = tokenizer.encode(
+                            injection, add_special_tokens=False
+                        )
+                        for tid in inj_ids:
+                            generated_tokens.append(tid)
+
+                        # Notify streaming callback
+                        if self._on_token is not None:
+                            self._on_token(
+                                injection,
+                                CognitiveSignal(
+                                    decision=Decision.DEEP,
+                                    introspection=f"[RAG: {topic[:50]}]",
+                                ),
+                            )
+
+                        # CRITICAL: Rebuild full KV cache (RoPE correctness)
+                        gen_ids = torch.tensor(
+                            [generated_tokens], device=model.device
+                        )
+                        full_input = torch.cat(
+                            [prompt_ids, gen_ids], dim=1
+                        )
+                        with torch.no_grad():
+                            rebuild_out = model(
+                                input_ids=full_input,
+                                use_cache=True,
+                                return_dict=True,
+                            )
+                        past_key_values = rebuild_out.past_key_values
+                        logits = rebuild_out.logits[:, -1, :]
+
+                        logger.info(
+                            f"[METIS] RAG injection #{rag_injection_count} "
+                            f"at step {step}: topic=\"{topic[:60]}\", "
+                            f"context={len(injection)} chars"
+                        )
+
+                        # Re-sample and continue (don't break)
+                        next_token_id = self._cognitive_sample(
+                            logits, signal, _effective_temp, top_p,
+                            generated_tokens,
+                        )
+                        generated_tokens.append(next_token_id)
+                        if (self._on_token is not None
+                                and next_token_id != tokenizer.eos_token_id):
+                            token_text = tokenizer.decode(
+                                [next_token_id], skip_special_tokens=True
+                            )
+                            if is_thinking:
+                                vis_buffer.append((token_text, signal))
+                            else:
+                                self._on_token(token_text, signal)
+                        if next_token_id == tokenizer.eos_token_id:
+                            break
+                        input_ids = torch.tensor(
+                            [[next_token_id]], device=model.device
+                        )
+                        continue
+
                 logger.info(
                     f"[METIS] Boundary SEEK at step {step}: "
                     f"{signal.introspection}"
@@ -1622,6 +1723,7 @@ class MetisInference:
             system2_ratio=system2_ratio,
             system2_triggered=system2_triggered,
             boundary_interventions=boundary_interventions,
+            rag_injections=rag_injection_count,
             was_hedged=was_hedged,
             was_refused=was_refused,
             was_verified=was_verified,
@@ -1782,6 +1884,10 @@ class MetisInference:
             r'Do NOT escape to modular arithmetic or redefine symbols\.?\n?',
             '', answer, flags=re.IGNORECASE,
         )
+        # Strip RAG grounding context (invisible to final output)
+        answer = re.sub(r'<metis_pause_and_search[^/]*/>', '', answer)
+        answer = re.sub(r'<grounding_context>.*?</grounding_context>', '', answer, flags=re.DOTALL)
+        answer = re.sub(r'Based on the above verified information,?\s*', '', answer)
         # Strip MathML/XML garbage (incomplete blocks from force-stop)
         answer = re.sub(r'<math\b[^>]*>.*?</math>', '', answer, flags=re.DOTALL)
         answer = re.sub(r'<math\b[^>]*>[^<]*$', '', answer)  # unclosed <math>
@@ -2251,3 +2357,218 @@ class MetisInference:
                 f"({meta_judgment.reasoning})"
             )
         return parts
+
+    # ═══════════════════════════════════════════════════════════
+    # Deterministic Cognitive Routing State Machine
+    # ═══════════════════════════════════════════════════════════
+    # Migrated from tools/metis_router_gateway.py (Phase 8).
+    # Parses DPO-trained model output for [COGNITIVE_STATE: ...]
+    # tags and repairs autoregressive syntax degradation.
+
+    _COGNITIVE_TAG_RE = re.compile(
+        r"\[COGNITIVE_STATE:\s*(FAST|DEEP)\]", re.IGNORECASE
+    )
+    _THINK_OPEN_RE = re.compile(r"<thinking>", re.IGNORECASE)
+    _THINK_CLOSE_RE = re.compile(r"</thinking>", re.IGNORECASE)
+    _ANSWER_BOUNDARY_RE = re.compile(
+        r"(?:^|\n)\s*(?:"
+        r"FINAL\s*ANSWER\s*[:\-]"
+        r"|(?:So|Therefore|Thus|Hence|In\s+(?:summary|conclusion)),?\s"
+        r"|(?:The\s+(?:answer|result|solution)\s+is)"
+        r"|(?:\*\*(?:Answer|Solution|Result)\*\*)"
+        r"|(?:#{1,3}\s*(?:Answer|Solution|Result))"
+        r")",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    _COGNITIVE_SYSTEM_PROMPT = (
+        "You are METIS, an AI with a dynamic cognitive routing layer. "
+        "Analyze the complexity of the user's request and allocate "
+        "compute accordingly."
+    )
+
+    @staticmethod
+    def _repair_thinking_closure(
+        text_after_tag: str,
+    ) -> Tuple[Optional[str], str, bool]:
+        """Parse DEEP output, repairing broken </thinking> closures.
+
+        Returns:
+            (thinking_text, answer_text, was_repaired)
+        """
+        open_m = MetisInference._THINK_OPEN_RE.search(text_after_tag)
+        if not open_m:
+            return None, text_after_tag.strip(), False
+
+        after_open = text_after_tag[open_m.end():]
+
+        # Clean case: properly closed
+        close_m = MetisInference._THINK_CLOSE_RE.search(after_open)
+        if close_m:
+            thinking = after_open[:close_m.start()].strip()
+            answer = after_open[close_m.end():].strip()
+            return thinking, answer, False
+
+        # ── Degradation repair: </thinking> is MISSING ──
+        boundary_m = MetisInference._ANSWER_BOUNDARY_RE.search(after_open)
+        if boundary_m:
+            thinking = after_open[:boundary_m.start()].strip()
+            answer = after_open[boundary_m.start():].strip()
+            return thinking, answer, True
+
+        # Last resort: paragraph break
+        last_para = after_open.rfind("\n\n")
+        if last_para > 0 and last_para < len(after_open) - 10:
+            thinking = after_open[:last_para].strip()
+            answer = after_open[last_para:].strip()
+            return thinking, answer, True
+
+        # Absolute fallback
+        return after_open.strip(), "", True
+
+    @staticmethod
+    def _parse_cognitive_route(
+        raw: str,
+    ) -> Dict[str, Any]:
+        """Deterministic state machine: classify raw model output.
+
+        Returns dict with keys:
+            route: "DEEP" | "FAST" | "FAST (Implicit)"
+            thinking: str | None
+            answer: str
+            decision: Decision  (mapped for InferenceResult)
+            repaired: bool
+        """
+        tag_m = MetisInference._COGNITIVE_TAG_RE.search(raw)
+
+        # ── Case A: Explicit DEEP ──
+        if tag_m and tag_m.group(1).upper() == "DEEP":
+            body = (raw[:tag_m.start()] + raw[tag_m.end():]).strip()
+            thinking, answer, repaired = MetisInference._repair_thinking_closure(body)
+            return {
+                "route": "DEEP",
+                "thinking": thinking,
+                "answer": answer,
+                "decision": Decision.DEEP,
+                "repaired": repaired,
+            }
+
+        # ── Case B: Explicit FAST ──
+        if tag_m and tag_m.group(1).upper() == "FAST":
+            body = (raw[:tag_m.start()] + raw[tag_m.end():]).strip()
+            body = MetisInference._THINK_OPEN_RE.sub("", body)
+            body = MetisInference._THINK_CLOSE_RE.sub("", body)
+            return {
+                "route": "FAST",
+                "thinking": None,
+                "answer": body.strip(),
+                "decision": Decision.FAST,
+                "repaired": False,
+            }
+
+        # ── Case C: No tag → Implicit FAST short-circuit ──
+        return {
+            "route": "FAST (Implicit)",
+            "thinking": None,
+            "answer": raw.strip(),
+            "decision": Decision.FAST,
+            "repaired": False,
+        }
+
+    @torch.no_grad()
+    def generate_cognitive(
+        self,
+        prompt: str,
+        max_new_tokens: int = 1024,
+        system_prompt: Optional[str] = None,
+        repetition_penalty: float = 1.1,
+    ) -> InferenceResult:
+        """METIS cognitive-routed generation with deterministic output parsing.
+
+        Uses the DPO-trained model's own cognitive tags ([COGNITIVE_STATE: ...])
+        and applies post-generation state-machine parsing to produce a clean,
+        structured InferenceResult.
+
+        This is the primary entry point for production inference with the
+        METIS DPO model.  Unlike ``generate()`` (which does token-by-token
+        monitoring with real-time entropy signals), this method trusts the
+        model's trained routing and focuses on output repair.
+
+        Args:
+            prompt: User query string.
+            max_new_tokens: Generation budget.
+            system_prompt: Override the default METIS system prompt.
+
+        Returns:
+            InferenceResult with cognitive_route, thinking_text, and
+            repaired answer fields populated.
+        """
+        model = self._metis.model
+        tokenizer = self._metis.tokenizer
+
+        if model is None or tokenizer is None:
+            raise ValueError(
+                "model and tokenizer required. "
+                "Use Metis.attach(model, tokenizer) first."
+            )
+
+        start_time = time.perf_counter()
+
+        sys_prompt = system_prompt or self._COGNITIVE_SYSTEM_PROMPT
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        input_ids = tokenizer.apply_chat_template(
+            messages, tokenize=True, return_tensors="pt",
+            add_generation_prompt=True,
+        ).to(model.device)
+
+        attention_mask = torch.ones_like(input_ids)
+
+        output_ids = model.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            repetition_penalty=repetition_penalty,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+
+        # CRITICAL: skip_special_tokens=False to preserve cognitive tags
+        # (registered as special tokens in the tokenizer).
+        new_tokens = output_ids[0, input_ids.shape[1]:]
+        raw = tokenizer.decode(new_tokens, skip_special_tokens=False)
+        if tokenizer.eos_token:
+            raw = raw.split(tokenizer.eos_token)[0]
+        raw = raw.strip()
+
+        latency = (time.perf_counter() - start_time) * 1000
+
+        # ── Deterministic State Machine ──
+        parsed = self._parse_cognitive_route(raw)
+
+        result = InferenceResult(
+            text=parsed["answer"],
+            thinking_text=parsed["thinking"] or "",
+            tokens_generated=len(new_tokens),
+            latency_ms=latency,
+            final_decision=parsed["decision"],
+            cognitive_route=parsed["route"],
+            thinking_repaired=parsed["repaired"],
+            raw_output=raw,
+        )
+
+        # Broadcast summary signal to listeners (SignalBridge / Dashboard)
+        if self._metis._listeners:
+            summary_signal = CognitiveSignal(
+                decision=parsed["decision"],
+            )
+            for listener in self._metis._listeners:
+                try:
+                    listener(summary_signal, self._metis)
+                except Exception:
+                    pass
+
+        return result

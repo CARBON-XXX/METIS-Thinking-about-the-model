@@ -33,8 +33,7 @@ from __future__ import annotations
 import math
 import time
 import logging
-from typing import List, Tuple, Optional, Union
-from dataclasses import dataclass
+from typing import List, Tuple, Optional
 
 import torch
 import torch.nn.functional as F

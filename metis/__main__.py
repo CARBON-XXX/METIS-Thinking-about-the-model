@@ -50,7 +50,9 @@ def cmd_info() -> None:
         import torch
         cuda = torch.cuda.is_available()
         device = torch.cuda.get_device_name(0) if cuda else "CPU only"
-        vram = f"{torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB" if cuda else "N/A"
+        props = torch.cuda.get_device_properties(0) if cuda else None
+        vram_bytes = getattr(props, "total_memory", None) or getattr(props, "total_mem", 0) if props else 0
+        vram = f"{vram_bytes / 1e9:.1f} GB" if cuda else "N/A"
         print(f"  PyTorch         : {torch.__version__}")
         print(f"  CUDA            : {'✓' if cuda else '✗'} ({device})")
         print(f"  VRAM            : {vram}")
@@ -118,21 +120,20 @@ def cmd_attach(args: argparse.Namespace) -> None:
             break
 
         max_tokens = args.max_tokens
-        use_thinking = args.thinking
 
-        result = engine.generate(
+        result = engine.generate_cognitive(
             prompt,
-            max_tokens=max_tokens,
-            use_thinking_protocol=use_thinking,
+            max_new_tokens=max_tokens,
         )
 
         print(f"\n  {result.text}\n")
+        if result.thinking_text:
+            print(f"  {DIM}[thinking]{RESET} {result.thinking_text[:120]}...\n")
         print(f"  {DIM}[tokens={result.tokens_generated} "
-              f"entropy={result.avg_token_entropy:.3f} "
-              f"confidence={result.avg_confidence:.1%} "
-              f"system2={result.system2_ratio:.1%} "
-              f"hedged={result.was_hedged} "
-              f"refused={result.was_refused}]{RESET}\n")
+              f"route={result.cognitive_route} "
+              f"decision={result.final_decision.value} "
+              f"repaired={result.thinking_repaired} "
+              f"latency={result.latency_ms:.0f}ms]{RESET}\n")
 
 
 def cmd_experiment(args: argparse.Namespace) -> None:
@@ -166,7 +167,6 @@ def main() -> None:
                           help="HuggingFace model name")
     p_attach.add_argument("--device", type=str, default="auto", help="Device (cuda/cpu/auto)")
     p_attach.add_argument("--max-tokens", type=int, default=512, help="Max generation tokens")
-    p_attach.add_argument("--thinking", action="store_true", help="Enable Thinking Protocol")
 
     # metis experiment
     p_exp = subparsers.add_parser("experiment", help="Run full METIS training experiment")

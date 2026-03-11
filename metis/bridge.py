@@ -74,8 +74,8 @@ class SignalBridge:
     def stop(self) -> None:
         """Stop the WebSocket server."""
         self._stop_event.set()
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         logger.info("[Bridge] WebSocket server stopped")
 
     def on_signal(self, signal: "CognitiveSignal", metis: "Metis") -> None:

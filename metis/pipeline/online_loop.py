@@ -25,7 +25,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import gc
 import logging
 import os
 import sys
@@ -119,12 +118,14 @@ class MetisCognitiveRewardFn:
         device: Optional[str] = None,
     ):
         from metis.training.rewards import CognitiveRewardComputer
+        from metis.metis import Metis
 
         self._model = model
         self._tokenizer = tokenizer
         self._stride = metis_stride
         self._device = device or str(next(model.parameters()).device)
         self._reward_computer = CognitiveRewardComputer()
+        self._metis = Metis.attach(model, tokenizer)
         self._call_count = 0
 
     @torch.inference_mode()
@@ -145,17 +146,8 @@ class MetisCognitiveRewardFn:
         Returns:
             List of float rewards, one per completion
         """
-        from metis import MetisInference
-        from metis.core.types import CognitiveTrace
-
         self._call_count += 1
         rewards: List[float] = []
-
-        # Initialize METIS for teacher-forcing
-        metis = MetisInference(
-            model=self._model,
-            tokenizer=self._tokenizer,
-        )
 
         for i, completion in enumerate(completions):
             prompt = prompts[i] if prompts and i < len(prompts) else ""
@@ -182,22 +174,19 @@ class MetisCognitiveRewardFn:
                 logits = outputs.logits[0]  # [seq_len, vocab_size]
 
                 # Feed completion tokens through METIS stride-by-stride
-                metis.reset()
-                completion_len = input_ids.shape[1] - prompt_len
+                self._metis.start_session(query=prompt)
 
                 for pos in range(prompt_len, input_ids.shape[1]):
-                    token_id = input_ids[0, pos].item()
                     step_logits = logits[pos - 1] if pos > 0 else logits[0]
 
                     # Feed to METIS every stride tokens
                     if (pos - prompt_len) % self._stride == 0:
-                        metis.step(
-                            token_id=token_id,
+                        self._metis.step(
                             logits=step_logits.unsqueeze(0),
-                            position=pos,
                         )
 
-                trace = metis.get_trace()
+                self._metis.end_session()
+                trace = self._metis.trace
                 reward_breakdown = self._reward_computer.compute(trace)
                 rewards.append(reward_breakdown.total)
 

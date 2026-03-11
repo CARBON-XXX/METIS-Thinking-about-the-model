@@ -19,10 +19,9 @@ Strategy matrix (for diagnostic classification after trigger):
   - DECOMPOSITION:  Logical complexity → "Let me break it down step by step"
   - REFLECTION:     Self-contradiction → "Let me re-check"
 """
-from typing import List, Optional
 import collections
 
-from ..core.types import CognitiveSignal, Decision, CoTStrategy, BoundaryAction
+from ..core.types import CognitiveSignal, Decision, CoTStrategy
 
 # ── Rust native acceleration (optional) ──
 try:

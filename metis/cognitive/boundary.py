@@ -292,3 +292,213 @@ class EpistemicBoundaryGuard:
         self._action_counts = {a: 0 for a in BoundaryAction}
         if self._native is not None:
             self._native.reset()
+
+
+# ═══════════════════════════════════════════════════════════
+# Generation-Level Semantic Entropy Probe
+# ═══════════════════════════════════════════════════════════
+# Kuhn et al. (ICLR 2023) approach adapted for METIS:
+#   1. Sample N short answers at high temperature
+#   2. Cluster into Semantic Equivalence Classes
+#   3. Compute Shannon entropy H = -Σ p_k log₂ p_k
+#   4. H > τ → model is guessing → UNKNOWN (epistemic boundary)
+#
+# This is SEPARATE from the token-level CUSUM guard above.
+# It is invoked on-demand, not per-token.
+
+import logging as _logging
+import math as _math
+import re as _re
+from dataclasses import dataclass as _dataclass, field as _field
+
+import torch as _torch
+
+_probe_log = _logging.getLogger(__name__ + ".probe")
+
+_EQUIV_PROMPT = (
+    "Do the following two answers convey the exact same core factual "
+    "information? Ignore differences in wording, style, or detail. "
+    "Focus ONLY on whether the key facts agree.\n\n"
+    "Answer A: {a}\n\nAnswer B: {b}\n\n"
+    "Reply with exactly one word: YES or NO."
+)
+
+_SAMPLE_SYS = (
+    "You are a helpful assistant. Answer the user's question in 1-2 "
+    "short sentences. Be direct and factual. Do not explain your "
+    "reasoning process."
+)
+
+SE_THRESHOLD = 0.8  # H > 0.8 → UNKNOWN
+
+
+@_dataclass
+class ProbeResult:
+    """Result of a semantic entropy probe."""
+    epistemic_state: EpistemicState
+    semantic_entropy: float
+    n_samples: int
+    n_clusters: int
+    samples: list
+    cluster_sizes: list = _field(default_factory=list)
+    threshold: float = SE_THRESHOLD
+
+
+class SemanticBoundaryProbe:
+    """Generation-level epistemic boundary probe using semantic entropy.
+
+    Samples multiple short answers at high temperature, clusters them
+    by semantic equivalence (LLM-judged), and computes Shannon entropy.
+    High entropy = semantically inconsistent answers = hallucination risk.
+
+    Usage::
+
+        from metis import Metis
+        from metis.cognitive.boundary import SemanticBoundaryProbe
+
+        metis = Metis.from_pretrained(path)
+        probe = SemanticBoundaryProbe(metis)
+        result = probe.evaluate_uncertainty("What year was X founded?")
+        print(result.epistemic_state, result.semantic_entropy)
+    """
+
+    def __init__(
+        self,
+        metis: Any,
+        n_samples: int = 5,
+        max_answer_tokens: int = 64,
+        temperature: float = 1.0,
+        threshold: float = SE_THRESHOLD,
+    ):
+        self._metis = metis
+        self._n_samples = n_samples
+        self._max_tokens = max_answer_tokens
+        self._temperature = temperature
+        self._threshold = threshold
+
+    def evaluate_uncertainty(
+        self,
+        prompt: str,
+        n_samples: Optional[int] = None,
+    ) -> ProbeResult:
+        """Probe the model's epistemic confidence on a prompt.
+
+        Args:
+            prompt: User query.
+            n_samples: Override default sample count.
+
+        Returns:
+            ProbeResult with entropy, clusters, and epistemic state.
+        """
+        n = n_samples or self._n_samples
+        model = self._metis.model
+        tokenizer = self._metis.tokenizer
+        if model is None or tokenizer is None:
+            raise ValueError("model/tokenizer required via Metis.attach()")
+
+        _probe_log.info(f"Sampling {n} answers for: \"{prompt[:80]}\" (T={self._temperature})")
+        samples = self._sample_answers(prompt, n, model, tokenizer)
+        _probe_log.info(f"  Samples: {[s[:60] for s in samples]}")
+
+        clusters = self._cluster_by_equivalence(samples, model, tokenizer)
+        sizes = [len(c) for c in clusters]
+        _probe_log.info(f"  Clusters: {len(clusters)}, sizes={sizes}")
+
+        entropy = self._shannon_entropy(sizes, n)
+        _probe_log.info(f"  H = {entropy:.4f} (τ = {self._threshold})")
+
+        if entropy > self._threshold:
+            state = EpistemicState.UNKNOWN
+        elif entropy > self._threshold * 0.5:
+            state = EpistemicState.UNCERTAIN
+        elif entropy > 0.0:
+            state = EpistemicState.LIKELY
+        else:
+            state = EpistemicState.KNOWN
+
+        _probe_log.info(f"  → {state.value}")
+        return ProbeResult(
+            epistemic_state=state,
+            semantic_entropy=entropy,
+            n_samples=n,
+            n_clusters=len(clusters),
+            samples=samples,
+            cluster_sizes=sizes,
+            threshold=self._threshold,
+        )
+
+    # ── Internals ──
+
+    @_torch.no_grad()
+    def _sample_answers(self, prompt: str, n: int, model: Any, tokenizer: Any) -> list:
+        """Generate N diverse short answers at high temperature."""
+        messages = [
+            {"role": "system", "content": _SAMPLE_SYS},
+            {"role": "user", "content": prompt},
+        ]
+        input_ids = tokenizer.apply_chat_template(
+            messages, tokenize=True, return_tensors="pt",
+            add_generation_prompt=True,
+        ).to(model.device)
+        attn = _torch.ones_like(input_ids)
+
+        out: list = []
+        for _ in range(n):
+            ids = model.generate(
+                input_ids, attention_mask=attn,
+                max_new_tokens=self._max_tokens,
+                do_sample=True, temperature=self._temperature, top_p=0.95,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+            text = tokenizer.decode(ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+            out.append(text)
+        return out
+
+    @_torch.no_grad()
+    def _check_equiv(self, a: str, b: str, model: Any, tokenizer: Any) -> bool:
+        """LLM zero-shot YES/NO semantic equivalence judgment."""
+        msgs = [{"role": "user", "content": _EQUIV_PROMPT.format(a=a, b=b)}]
+        ids = tokenizer.apply_chat_template(
+            msgs, tokenize=True, return_tensors="pt",
+            add_generation_prompt=True,
+        ).to(model.device)
+        attn = _torch.ones_like(ids)
+        out = model.generate(
+            ids, attention_mask=attn, max_new_tokens=8,
+            do_sample=False, pad_token_id=tokenizer.pad_token_id,
+        )
+        verdict = tokenizer.decode(out[0, ids.shape[1]:], skip_special_tokens=True).strip().upper()
+        if "YES" in verdict[:10]:
+            return True
+        if "NO" in verdict[:10]:
+            return False
+        # Fallback: normalized exact match
+        na = _re.sub(r'\s+', ' ', a.lower().strip())
+        nb = _re.sub(r'\s+', ' ', b.lower().strip())
+        return na == nb
+
+    def _cluster_by_equivalence(self, samples: list, model: Any, tokenizer: Any) -> list:
+        """Cluster answers into semantic equivalence classes via pairwise LLM judgment."""
+        clusters: list = []
+        for sample in samples:
+            placed = False
+            for cluster in clusters:
+                if self._check_equiv(cluster[0], sample, model, tokenizer):
+                    cluster.append(sample)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([sample])
+        return clusters
+
+    @staticmethod
+    def _shannon_entropy(sizes: list, total: int) -> float:
+        """H = -Σ p_k log₂ p_k"""
+        if total == 0:
+            return 0.0
+        h = 0.0
+        for s in sizes:
+            if s > 0:
+                p = s / total
+                h -= p * _math.log2(p)
+        return h

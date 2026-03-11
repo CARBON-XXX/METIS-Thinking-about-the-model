@@ -25,4 +25,7 @@ def __getattr__(name: str):
         if name == "MetisResponseEvaluator":
             return MetisResponseEvaluator
         return MetisRetrieverGuard
+    if name == "RAGAdapter":
+        from .rag_adapter import RAGAdapter
+        return RAGAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

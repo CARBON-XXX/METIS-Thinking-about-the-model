@@ -39,16 +39,29 @@ class ExperimentConfig:
     max_new_tokens: int = 1024
     temperature: float = 0.7
 
+    # External Data override
+    external_dpo_data: str = None       # Path to pre-formatted JSON with {"prompt", "chosen", "rejected"}
+
+    # SFT Warmup: fine-tune base model on METIS-formatted data before DPO
+    # so the reference model's token distribution includes <thinking> format
+    sft_warmup: bool = True             # Enable SFT warmup stage
+    sft_data_path: str = None           # Path to SFT data JSON [{"prompt", "response"}]
+    sft_epochs: int = 1                 # Light warmup: 1 epoch is sufficient
+    sft_learning_rate: float = 2e-5     # Standard SFT LR (higher than DPO)
+    sft_batch_size: int = 16            # GB10 unified mem: SFT single fwd → can push batch high
+    sft_gradient_accumulation: int = 2  # Effective batch = 16 * 2 = 32 (same, fewer micro-steps)
+    sft_max_length: int = 1024          # p95 of Orca data is ~974 tokens
+
     # Training
-    dpo_epochs: int = 3
+    dpo_epochs: int = 1                 # 1 epoch is DPO standard (prevents overfitting on preference pairs)
     dpo_learning_rate: float = 1e-6     # Moderate: enough signal to cross KL barrier
-    dpo_batch_size: int = 8              # DGX: large batch, effective = batch * accum = 32
-    dpo_beta: float = 0.1               # Lower beta = more freedom to deviate from ref model
-    dpo_max_length: int = 2048           # DGX: full context window
-    gradient_checkpointing: bool = False  # DGX 128GB: no need to trade compute for memory
-    dpo_gradient_accumulation: int = 4   # Effective batch = 32
-    lora_r: int = 64                     # DGX: high-rank LoRA for 70B+ models
-    lora_alpha: int = 128
+    dpo_batch_size: int = 4             # GB10 unified mem: batch=4→~90GB (122GB total, 统一内存可弹性调度)
+    dpo_beta: float = 0.25              # Increased to 0.25 to protect native calibration
+    dpo_max_length: int = 1024           # GB10 safe: p95 of Orca data ~974 tokens; 1024 sufficient
+    gradient_checkpointing: bool = True   # MUST be True for 7B DPO to prevent OOM
+    dpo_gradient_accumulation: int = 4   # effective batch = 4 * 4 = 16 (same throughput, fewer micro-steps)
+    lora_r: int = 32                     # Reduced from 64 to save adapter VRAM
+    lora_alpha: int = 64
     lora_dropout: float = 0.05
 
     # Evaluation
@@ -56,7 +69,7 @@ class ExperimentConfig:
     eval_temperature: float = 0.7        # Match generation temp to prevent base model degeneration
 
     # Prompts
-    n_train_prompts: int = 300           # High to survive 60-70% rejection from cognitive filter
+    n_train_prompts: int = 1000          # Scaled up for global policy restructuring
     n_eval_prompts: int = 50              # Sufficient for p<0.05 statistical significance
 
     # External benchmarks (independent validation)
@@ -443,6 +456,17 @@ TRAIN_PROMPTS = [
     "How does the framing effect change how people evaluate risks?",
     "Explain why correlation coefficients can be misleading with nonlinear data.",
 ]
+
+import json
+import os
+_ext_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "extended_prompts.json")
+if os.path.exists(_ext_path):
+    try:
+        with open(_ext_path, "r", encoding="utf-8") as f:
+            _ext_prompts = json.load(f)
+            TRAIN_PROMPTS.extend(_ext_prompts)
+    except Exception:
+        pass
 
 EVAL_PROMPTS = [
     # ── Science fundamentals (10) ──

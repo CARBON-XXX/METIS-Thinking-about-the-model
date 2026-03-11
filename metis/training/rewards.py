@@ -38,6 +38,35 @@ from ..core.types import (
     BoundaryAction,
 )
 
+# ─────────────────────────────────────────────────────────
+# FINAL ANSWER Extraction — used by rewards + benchmarks
+# ─────────────────────────────────────────────────────────
+
+_FINAL_ANSWER_RE = re.compile(
+    r'FINAL\s*ANSWER\s*[:：]\s*(.+?)(?:\n|$)',
+    re.IGNORECASE,
+)
+
+def extract_final_answer(text: str) -> Optional[str]:
+    """Extract the FINAL ANSWER from model-generated text.
+
+    Strips <thinking> blocks first, then searches for 'FINAL ANSWER: ...'
+    Returns the extracted answer string, or None if not found.
+
+    Used by:
+      - CognitiveRewardComputer: to compare against ground-truth
+      - BenchmarkSuite: to extract A/B/C/D from MMLU answers
+    """
+    # Strip thinking blocks
+    cleaned = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL).strip()
+    if not cleaned:
+        return None
+
+    match = _FINAL_ANSWER_RE.search(cleaned)
+    if match:
+        return match.group(1).strip()
+    return None
+
 # ── Rust native reward accelerator (10-50x faster) ──
 try:
     from metis_native import RewardComputerNative as _NativeRewardComputer
@@ -100,6 +129,20 @@ class RewardConfig:
     thinking_overlap_threshold: float = 0.3  # Jaccard overlap above this → penalty
     thinking_ngram_size: int = 2            # Character n-gram size for overlap
 
+    # Ground-truth correctness: anchor reward to factual accuracy
+    # When ground_truth is provided, this component checks if the model's
+    # answer contains the correct answer, breaking the "eloquent nonsense" trap
+    w_correctness: float = 0.30             # Strong weight — correctness is fundamental
+    correctness_partial_credit: float = 0.3 # Partial credit for near-matches
+
+    # ── Circuit breaker: absolute veto on incorrect answers ──
+    # When True AND ground_truth is available: wrong answer → R_total = veto_penalty
+    # This is the nuclear option that breaks "eloquent nonsense" completely.
+    # Math: R_total = veto_penalty if correctness < veto_threshold
+    correctness_veto_enabled: bool = True
+    correctness_veto_threshold: float = 0.0  # correctness score below this → veto
+    correctness_veto_penalty: float = -1.0   # forced R_total when veto triggers
+
     # Length penalty: slight preference for concise responses
     length_penalty_threshold: int = 512     # tokens
     length_penalty_scale: float = 0.001     # per extra token
@@ -122,6 +165,7 @@ class RewardBreakdown:
     epistemic_honesty: float = 0.0
     efficiency: float = 0.0
     thinking_quality: float = 0.0
+    correctness: float = 0.0          # Ground-truth answer correctness
 
     # Length penalty (subtracted from total)
     length_penalty: float = 0.0
@@ -138,6 +182,7 @@ class RewardBreakdown:
             "epistemic_honesty": round(self.epistemic_honesty, 4),
             "efficiency": round(self.efficiency, 4),
             "thinking_quality": round(self.thinking_quality, 4),
+            "correctness": round(self.correctness, 4),
             "length_penalty": round(self.length_penalty, 4),
             **{k: round(v, 4) for k, v in self.diagnostics.items()},
         }
@@ -162,12 +207,19 @@ class CognitiveRewardComputer:
         self._config = config or RewardConfig()
         self._native = _NativeRewardComputer() if _HAS_NATIVE_REWARDS else None
 
-    def compute(self, trace: CognitiveTrace) -> RewardBreakdown:
+    def compute(
+        self,
+        trace: CognitiveTrace,
+        ground_truth: Optional[str] = None,
+        model_answer: Optional[str] = None,
+    ) -> RewardBreakdown:
         """
         Compute full reward breakdown from a CognitiveTrace.
 
         Args:
             trace: Complete cognitive trace from an inference session
+            ground_truth: Optional correct answer string for correctness verification
+            model_answer: Optional model's generated answer text (for correctness check)
 
         Returns:
             RewardBreakdown with total score and per-component breakdown
@@ -222,17 +274,58 @@ class CognitiveRewardComputer:
                 trace.thinking_text, trace.answer_text
             )
 
+        # Ground-truth correctness (only when ground_truth is provided)
+        has_correctness = False
+        if ground_truth is not None and model_answer is not None:
+            breakdown.correctness = self._reward_correctness(
+                model_answer, ground_truth
+            )
+            has_correctness = True
+            breakdown.diagnostics["has_ground_truth"] = 1.0
+
+        # ── Circuit Breaker: absolute veto on incorrect answers ──
+        # If ground-truth is available and the answer is wrong,
+        # ALL cognitive rewards are overridden. R_total = -1.0.
+        # This prevents "perfectly calibrated, eloquent nonsense".
+        if (
+            has_correctness
+            and cfg.correctness_veto_enabled
+            and breakdown.correctness <= cfg.correctness_veto_threshold
+        ):
+            breakdown.total = cfg.correctness_veto_penalty
+            breakdown.diagnostics["veto_triggered"] = 1.0
+            breakdown.diagnostics["veto_reason"] = "incorrect_answer"
+            return breakdown
+
         # Weighted total
-        breakdown.total = (
-            cfg.w_coherence * breakdown.coherence
-            + cfg.w_calibration * breakdown.calibration
-            + cfg.w_phase * breakdown.phase_quality
-            + cfg.w_epistemic * breakdown.epistemic_honesty
-            + cfg.w_efficiency * breakdown.efficiency
-            + cfg.w_thinking_quality * breakdown.thinking_quality
-            + completeness_bonus
-            - breakdown.length_penalty
-        )
+        # When correctness is available, re-scale cognitive weights to make room
+        if has_correctness and cfg.w_correctness > 0:
+            # Scale cognitive components down proportionally
+            cog_scale = 1.0 - cfg.w_correctness
+            breakdown.total = (
+                cog_scale * (
+                    cfg.w_coherence * breakdown.coherence
+                    + cfg.w_calibration * breakdown.calibration
+                    + cfg.w_phase * breakdown.phase_quality
+                    + cfg.w_epistemic * breakdown.epistemic_honesty
+                    + cfg.w_efficiency * breakdown.efficiency
+                    + cfg.w_thinking_quality * breakdown.thinking_quality
+                )
+                + cfg.w_correctness * breakdown.correctness
+                + completeness_bonus
+                - breakdown.length_penalty
+            )
+        else:
+            breakdown.total = (
+                cfg.w_coherence * breakdown.coherence
+                + cfg.w_calibration * breakdown.calibration
+                + cfg.w_phase * breakdown.phase_quality
+                + cfg.w_epistemic * breakdown.epistemic_honesty
+                + cfg.w_efficiency * breakdown.efficiency
+                + cfg.w_thinking_quality * breakdown.thinking_quality
+                + completeness_bonus
+                - breakdown.length_penalty
+            )
 
         return breakdown
 
@@ -747,3 +840,75 @@ class CognitiveRewardComputer:
             reward = min(1.0, deficit)
 
         return max(-1.0, min(1.0, reward))
+
+    # ═══════════════════════════════════════════════════════
+    # R₇: Correctness — ground-truth answer verification
+    # ═══════════════════════════════════════════════════════
+
+    def _reward_correctness(
+        self, model_answer: str, ground_truth: str
+    ) -> float:
+        """
+        Ground-truth correctness reward: anchor cognitive rewards to factual accuracy.
+
+        Problem: Without this signal, the model can score high rewards by
+        producing "eloquent nonsense" — coherent, well-calibrated, properly-phased
+        text that is factually wrong. This component breaks that trap.
+
+        Matching strategy (layered, generous):
+          1. Exact match (after normalization) → +1.0
+          2. Ground-truth contained in answer → +0.8
+          3. High token overlap (>50%) → partial credit [0, 0.6]
+          4. No match → -0.5 (penalty, not -1.0, to allow for paraphrasing)
+
+        The matching is case-insensitive and strips <thinking> blocks, punctuation,
+        and extra whitespace before comparison.
+
+        Returns:
+            float in [-1.0, 1.0]
+        """
+        cfg = self._config
+
+        # Normalize: strip tags, lowercase, collapse whitespace
+        def _normalize(text: str) -> str:
+            t = re.sub(r'<[^>]+>', '', text)  # Remove XML tags
+            t = re.sub(r'[^\w\s]', ' ', t)    # Remove punctuation
+            t = re.sub(r'\s+', ' ', t).strip().lower()
+            return t
+
+        norm_answer = _normalize(model_answer)
+        norm_truth = _normalize(ground_truth)
+
+        if not norm_answer or not norm_truth:
+            return 0.0
+
+        # Strategy 1: Exact match
+        if norm_answer == norm_truth:
+            return 1.0
+
+        # Strategy 2: Containment (ground-truth is a substring of answer)
+        if norm_truth in norm_answer:
+            return 0.8
+
+        # Strategy 3: Answer is a substring of ground-truth (short but correct)
+        if norm_answer in norm_truth and len(norm_answer) > 3:
+            return 0.7
+
+        # Strategy 4: Token overlap (handles paraphrasing)
+        truth_tokens = set(norm_truth.split())
+        answer_tokens = set(norm_answer.split())
+
+        if not truth_tokens:
+            return 0.0
+
+        overlap = len(truth_tokens & answer_tokens)
+        recall = overlap / len(truth_tokens)       # How much of truth is in answer
+        precision = overlap / max(len(answer_tokens), 1)  # How much of answer is truth
+
+        if recall > 0.5 and precision > 0.3:
+            # Significant overlap → partial credit
+            f1 = 2 * precision * recall / max(precision + recall, 1e-6)
+            return cfg.correctness_partial_credit + (1.0 - cfg.correctness_partial_credit) * f1
+
+        # Strategy 5: No meaningful match → penalty
+        return -0.5

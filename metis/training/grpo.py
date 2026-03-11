@@ -27,7 +27,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from ..core.types import CognitiveTrace
 from .rewards import CognitiveRewardComputer, RewardBreakdown, RewardConfig

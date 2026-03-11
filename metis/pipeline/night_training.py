@@ -30,21 +30,34 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from metis.metis import Metis
 from metis.pipeline.config import ExperimentConfig
 from metis.pipeline.yaml_config import load_config
 from metis.search.entropy_search import EntropyGuidedSearch
 from metis.search.tree_node import SearchConfig
+from metis.pipeline.web_search import web_search, SearchResult
 
 logger = logging.getLogger("metis.night")
 
 
-def _simulate_web_search(query: str) -> str:
-    """Mock external tool call (e.g. Wikipedia/Google Search)."""
-    # In a real system, this would call Tavily/Google Search API
-    logger.info(f"    [Tool] Executing search for: {query}")
-    # Returning a mock factual context to simulate breaking the knowledge gap
-    return f"The widely accepted factual consensus regarding '{query}' is that it functions through established theoretical principles."
+def _real_web_search(query: str, preferred_backend: Optional[str] = None) -> str:
+    """Execute a real web search via multi-backend retrieval engine.
+    
+    Backends (in priority order): Tavily API > DuckDuckGo > Wikipedia.
+    Set TAVILY_API_KEY env var to enable the highest-quality backend.
+    Returns concatenated context string, or empty string on total failure.
+    """
+    result: SearchResult = web_search(
+        query=query,
+        max_results=5,
+        preferred_backend=preferred_backend,
+    )
+    if result.success:
+        logger.info(
+            f"    [Tool] Retrieved {len(result.sources)} sources via {result.backend} "
+            f"({result.latency_s:.1f}s)"
+        )
+        return result.context
+    return ""
 
 
 def _train_cpt(config: ExperimentConfig, model: Any, tokenizer: Any, texts: List[str], output_path: str) -> None:
@@ -89,6 +102,7 @@ def run_night_training(
     config: ExperimentConfig,
     knowledge_gap_path: str = "metis_knowledge_gaps.json",
     output_dir: str = "./night_dreams",
+    preferred_search_backend: Optional[str] = None,
 ) -> None:
     """Run the offline dreaming training loop."""
     logger.info("=" * 60)
@@ -184,6 +198,40 @@ def run_night_training(
                     f"  -> Debate Failed! Path is fragile/confabulated "
                     f"(F={cf_result.fragility_score:.2f}). Rejecting path."
                 )
+                # ── Confabulation Recovery: model is confident but WRONG ──
+                # This is the most dangerous failure mode. Use web search to
+                # ground the model with real facts, then re-search.
+                logger.info("  -> Triggering Confabulation Recovery via Web Search...")
+                recovered_context = _real_web_search(query, preferred_backend=preferred_search_backend)
+                if recovered_context:
+                    logger.info(f"  -> Retrieved grounding context: {recovered_context[:60]}...")
+                    # CPT: inject the real fact
+                    cpt_text = (
+                        f"Question: {query}\n"
+                        f"Verified Context: {recovered_context}\n"
+                        f"Answer: Based on verified sources, {recovered_context}."
+                    )
+                    cpt_texts.append(cpt_text)
+                    # Re-search with grounded context
+                    augmented_prompt = f"Context: {recovered_context}\nQuestion: {query}"
+                    logger.info("  -> Re-running EGTS with grounded context...")
+                    aug_result = searcher.search(augmented_prompt, max_tokens=1024, chat_template=True)
+                    if aug_result.convergence_achieved:
+                        logger.info(
+                            f"  -> Confabulation corrected! "
+                            f"(H={aug_result.best_path_entropy:.3f})"
+                        )
+                        # The ORIGINAL confabulated path becomes the "rejected" sample
+                        dpo_pairs.append({
+                            "prompt": query,
+                            "chosen": aug_result.text,
+                            "rejected": result.text,  # original hallucination
+                        })
+                        resolved_queries.append(query)
+                    else:
+                        logger.warning("  -> Still cannot converge even with grounding. Gap too deep.")
+                else:
+                    logger.warning("  -> Web search failed. Cannot recover from confabulation.")
                 continue
                 
             logger.info(f"  -> Debate Passed. Path is robust (F={cf_result.fragility_score:.2f}).")
@@ -214,8 +262,8 @@ def run_night_training(
             # ── 3c. Tool-Augmented Dreaming (Breaking the Information Cocoon) ──
             # The model fundamentally doesn't know the fact. EGTS cannot invent facts.
             # Trigger external retrieval.
-            logger.info("  -> Triggering Tool-Augmented Retrieval...")
-            retrieved_context = _simulate_web_search(query)
+            logger.info("  -> Triggering Tool-Augmented Retrieval (LIVE)...")
+            retrieved_context = _real_web_search(query, preferred_backend=preferred_search_backend)
             
             if retrieved_context:
                 logger.info(f"  -> Retrieved external context: {retrieved_context[:60]}...")
@@ -304,6 +352,11 @@ def main() -> None:
     parser.add_argument("--config", type=str, default="", help="Path to YAML config")
     parser.add_argument("--gaps", type=str, default="metis_knowledge_gaps.json")
     parser.add_argument("--output", type=str, default="./night_dreams")
+    parser.add_argument(
+        "--search-backend", type=str, default=None,
+        choices=["tavily", "ddgs", "wikipedia"],
+        help="Preferred web search backend (default: auto-fallback)",
+    )
     args = parser.parse_args()
 
     if args.config:
@@ -311,7 +364,12 @@ def main() -> None:
     else:
         config = ExperimentConfig()
 
-    run_night_training(config, knowledge_gap_path=args.gaps, output_dir=args.output)
+    run_night_training(
+        config,
+        knowledge_gap_path=args.gaps,
+        output_dir=args.output,
+        preferred_search_backend=args.search_backend,
+    )
 
 
 if __name__ == "__main__":

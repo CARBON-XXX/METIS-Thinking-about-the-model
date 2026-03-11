@@ -11,7 +11,6 @@ Phase 4: Generate comparison report with statistical analysis
 """
 from __future__ import annotations
 
-import gc
 import json
 import logging
 import math
@@ -19,13 +18,14 @@ import os
 import random
 import threading
 from dataclasses import asdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 
 import torch
 
 from metis.pipeline.config import (
     C, ExperimentConfig, EvalMetrics, EVAL_PROMPTS, format_chat,
 )
+from metis.training.tokenizer_utils import register_metis_special_tokens
 
 logger = logging.getLogger("experiment")
 
@@ -70,6 +70,7 @@ def phase3_evaluate(
         torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
         trust_remote_code=True,
     ).to(device)
+    tokenizer, base_model = register_metis_special_tokens(tokenizer, base_model)
     base_model.eval()
 
     # ─── Evaluate Base Model ───
@@ -96,6 +97,7 @@ def phase3_evaluate(
             torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
             trust_remote_code=True,
         ).to(device)
+        tokenizer, base_model = register_metis_special_tokens(tokenizer, base_model)
         base_model.eval()
     else:
         logger.warning("No METIS DPO checkpoint found — using base metrics as fallback")
@@ -144,6 +146,7 @@ def phase3_evaluate(
                 torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
                 trust_remote_code=True,
             ).to(device)
+            tokenizer, base_model = register_metis_special_tokens(tokenizer, base_model)
             base_model.eval()
 
             logger.info("Benchmarking: Random DPO")

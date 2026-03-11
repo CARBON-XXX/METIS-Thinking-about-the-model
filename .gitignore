@@ -1,5 +1,6 @@
 # Data files
 data/
+!data/golden_anchor.jsonl
 *.json
 !sedac/v9/production/config.json
 !dashboard/package.json
@@ -68,8 +69,26 @@ scripts/
 *_knowledge_gaps.json
 traces/
 experiment_output/
+experiment_output_*/
 experiment_full/
+output_*/
 checkpoints/
+logs/
+night_dreams/
+
+# Junk pip artifacts
+=*
+
+# Paper compilation artifacts
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.synctex.gz
 
 # Rust build artifacts
 metis/_native/target/

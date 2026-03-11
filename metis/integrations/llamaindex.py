@@ -271,3 +271,11 @@ else:
     class MetisCallbackHandler:  # type: ignore[no-redef]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             _require_llamaindex()
+
+    class MetisResponseEvaluator:  # type: ignore[no-redef]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            _require_llamaindex()
+
+    class MetisRetrieverGuard:  # type: ignore[no-redef]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            _require_llamaindex()

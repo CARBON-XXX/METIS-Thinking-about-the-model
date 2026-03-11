@@ -77,8 +77,18 @@ def main() -> None:
     parser.add_argument("--vllm-data", type=str, default=None,
                         help="Path to pre-generated vLLM samples JSON (from vllm_batch_generate.py). "
                              "Skips generation, only does teacher-forcing for METIS traces.")
+    parser.add_argument("--external-dpo", type=str, default=None,
+                        help="Path to pre-formatted JSON with {'prompt', 'chosen', 'rejected'} pairs. "
+                             "Skips Phase 1 entirely and trains on this external data.")
     parser.add_argument("--no-benchmarks", action="store_true",
                         help="Skip external benchmarks (TruthfulQA + MMLU) in eval phase")
+    parser.add_argument("--sft-data", type=str, default=None,
+                        help="Path to SFT warmup data JSON [{\"text\": ...}]. "
+                             "If not provided but --external-dpo is set, SFT data is auto-generated from chosen responses.")
+    parser.add_argument("--no-sft", action="store_true",
+                        help="Disable SFT warmup stage (not recommended — causes KL explosion)")
+    parser.add_argument("--sft-epochs", type=int, default=1,
+                        help="SFT warmup epochs (default: 1)")
     args = parser.parse_args()
 
     config = ExperimentConfig(
@@ -91,6 +101,10 @@ def main() -> None:
         dpo_epochs=args.dpo_epochs,
         dpo_learning_rate=args.dpo_lr,
         lora_r=args.lora_r,
+        external_dpo_data=args.external_dpo,
+        sft_warmup=not args.no_sft,
+        sft_data_path=args.sft_data,
+        sft_epochs=args.sft_epochs,
         eval_max_tokens=args.max_tokens,
         run_benchmarks=not args.no_benchmarks,
     )
@@ -112,6 +126,7 @@ def main() -> None:
 
  > COGNITIVE_LAYER.......[{C.GREEN}ONLINE{C.RESET}]
  > REWARD_COMPUTER.......[{C.GREEN}ACTIVE{C.RESET}]
+ > SFT_WARMUP............[{C.GREEN if config.sft_warmup else C.RED}{"ENABLED" if config.sft_warmup else "DISABLED"}{C.RESET}]
  > DPO_TRAINER...........[{C.YELLOW}STANDBY{C.RESET}]
  > EVAL_PIPELINE.........[{C.YELLOW}STANDBY{C.RESET}]
 
@@ -127,9 +142,13 @@ def main() -> None:
     start = time.time()
 
     if args.phase in ("all", "generate"):
-        scored_data, model, tokenizer = phase1_generate(
-            config, vllm_url=vllm_url, vllm_data_path=vllm_data_path,
-        )
+        if config.external_dpo_data:
+            logger.info(f"Skipping Phase 1 Generation. Using external DPO dataset: {config.external_dpo_data}")
+            scored_data = [] # Not needed, handled in Phase 2
+        else:
+            scored_data, model, tokenizer = phase1_generate(
+                config, vllm_url=vllm_url, vllm_data_path=vllm_data_path,
+            )
 
         if args.phase == "generate":
             logger.info("Phase 1 complete. Use --phase train to continue.")
@@ -149,10 +168,13 @@ def main() -> None:
         model = AutoModelForCausalLM.from_pretrained(config.model_name, **model_kwargs).to(device)
         model.eval()
 
-        # Load scored data
-        data_path = os.path.join(config.output_dir, "phase1_scored_data.json")
-        with open(data_path, "r", encoding="utf-8") as f:
-            scored_data = json.load(f)
+        if not config.external_dpo_data:
+            # Load scored data
+            data_path = os.path.join(config.output_dir, "phase1_scored_data.json")
+            with open(data_path, "r", encoding="utf-8") as f:
+                scored_data = json.load(f)
+        else:
+            scored_data = [] # Not used, Phase 2 will load directly
 
     if args.phase in ("all", "train"):
         metis_path, random_path = phase2_train(config, scored_data, model, tokenizer)

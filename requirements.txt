@@ -1,19 +1,40 @@
-torch>=2.0.0
-
-transformers>=4.36.0
-
-vllm>=0.4.0
-
-datasets
-
+# ── Core ──
+torch>=2.0
+transformers>=4.36
+datasets>=2.0
+safetensors>=0.3
 tqdm
 
+# ── Training (DPO / GRPO / SFT) ──
+trl>=0.7
+peft>=0.6
+bitsandbytes>=0.41        # optional: QLoRA quantization
+
+# ── Inference ──
+vllm>=0.4                 # optional: fast batch generation server
+
+# ── HTTP / Streaming ──
+requests
+starlette                 # SSE inference server (metis.serve)
+uvicorn                   # ASGI runner for metis.serve
+websockets                # SignalBridge real-time streaming
+
+# ── Configuration ──
+PyYAML>=6.0
+
+# ── Monitoring ──
 prometheus-client
+psutil                    # optional: process-level monitoring
+pynvml>=12.0              # optional: GPU idle detection (DreamingDaemon)
 
-safetensors
-
-# Semantic Entropy (Kuhn et al.) — NLI equivalence checking
+# ── Semantic Entropy (Kuhn et al.) — NLI equivalence checking ──
 # Default NLI model: cross-encoder/nli-deberta-v3-base
-# Optional embedding fallback:
-# sentence-transformers>=2.2.0
+sentence-transformers>=2.2.0  # optional: embedding fallback for SE probe
 
+# ── Tool-Augmented Dreaming — web search backends ──
+ddgs>=9.0
+wikipedia>=1.4
+
+# ── Optional integrations (not required for core) ──
+# langchain-core>=0.1       # LangChain MetisLLM wrapper
+# llama-index>=0.10         # LlamaIndex evaluator / retriever guard

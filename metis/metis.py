@@ -118,8 +118,8 @@ class Metis:
     def attach(
         cls,
         model: nn.Module,
-        tokenizer=None,
-        **kwargs,
+        tokenizer: Any = None,
+        **kwargs: Any,
     ) -> "Metis":
         """
         Attach METIS to a model in one line.
@@ -142,6 +142,55 @@ class Metis:
             pass
         
         return instance
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_path: str,
+        torch_dtype: Any = None,
+        device_map: str = "auto",
+        trust_remote_code: bool = True,
+        **kwargs,
+    ) -> "Metis":
+        """
+        Load a model + tokenizer from disk and attach METIS in one call.
+
+        Usage:
+            metis = Metis.from_pretrained("experiment_output_dpo_balanced/metis_dpo_cognitive")
+            engine = MetisInference(metis)
+            result = engine.generate_cognitive("What is 5 + 7?")
+
+        Args:
+            model_path: Path to the HuggingFace model directory.
+            torch_dtype: Override dtype (default: torch.bfloat16).
+            device_map: Device placement strategy (default: "auto").
+            trust_remote_code: Trust remote code in model config.
+            **kwargs: Forwarded to Metis.__init__().
+
+        Returns:
+            Metis instance with model and tokenizer attached.
+        """
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        if torch_dtype is None:
+            torch_dtype = torch.bfloat16
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=trust_remote_code
+        )
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            device_map=device_map,
+            trust_remote_code=trust_remote_code,
+            attn_implementation="sdpa",
+        )
+        model.eval()
+
+        return cls.attach(model, tokenizer, **kwargs)
     
     # =============================================================
     # Core API
@@ -292,12 +341,12 @@ class Metis:
         return self._model
     
     @property
-    def tokenizer(self):
+    def tokenizer(self) -> Any:
         """Attached tokenizer reference"""
         return self._tokenizer
     
     @property
-    def knowledge_gaps(self):
+    def knowledge_gaps(self) -> List["KnowledgeGap"]:
         """All unresolved knowledge gaps"""
         return self._curiosity.get_unresolved_gaps()
     
@@ -306,11 +355,11 @@ class Metis:
         """Generation-level semantic entropy estimator (Kuhn et al.)"""
         return self._se_estimator
     
-    def add_listener(self, callback) -> None:
+    def add_listener(self, callback: Callable[..., Any]) -> None:
         """Register a signal listener callback(signal, metis)."""
         self._listeners.append(callback)
 
-    def remove_listener(self, callback) -> None:
+    def remove_listener(self, callback: Callable[..., Any]) -> None:
         """Remove a signal listener."""
         try:
             self._listeners.remove(callback)
@@ -358,7 +407,7 @@ class Metis:
         self,
         prompt: str,
         model: Optional[nn.Module] = None,
-        tokenizer=None,
+        tokenizer: Any = None,
         n_samples: Optional[int] = None,
         chat_template: bool = True,
     ) -> SemanticEntropyResult:

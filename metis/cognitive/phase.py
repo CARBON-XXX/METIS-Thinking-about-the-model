@@ -16,7 +16,6 @@ No hardcoded floors — adapts to any model, language, or task difficulty.
 """
 from collections import deque
 from enum import Enum
-from typing import Optional
 
 from ..core.types import CognitiveSignal, Decision
 

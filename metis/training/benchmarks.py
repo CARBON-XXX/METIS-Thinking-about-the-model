@@ -23,8 +23,10 @@ Supported benchmarks:
      → should improve instruction adherence
 ═══════════════════════════════════════════════════════════════════
 
-All benchmarks use log-likelihood scoring (no generation needed),
-making evaluation fast even on 8GB GPUs.
+MMLU and TruthfulQA MC1 use **generative parsing**: the model generates
+a response, then regex extraction pulls the final answer letter.  This
+correctly evaluates models that emit <thinking> blocks before answering.
+TruthfulQA MC2 still uses log-likelihood scoring (multi-correct target).
 
 Usage:
     from metis.training.benchmarks import BenchmarkSuite
@@ -36,9 +38,8 @@ from __future__ import annotations
 
 import gc
 import logging
-import math
-import os
 import random
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -46,6 +47,128 @@ import torch
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────
+# Generative Answer Extraction Helpers
+# ─────────────────────────────────────────────────────
+
+# ── Tier 1: Explicit answer markers (highest confidence) ──
+_TIER1_RE = re.compile(
+    r'(?:'
+    r'FINAL\s*ANSWER\s*[:：]\s*\(?([A-Da-d])\)?'
+    r'|(?:最终答案|答案)\s*[:：]?\s*\(?([A-Da-d])\)?'
+    r'|(?:the\s+)?(?:correct\s+)?answer\s+is\s*[:：]?\s*\(?([A-Da-d])\)?'
+    r'|(?:I\s+(?:choose|pick|select|would\s+(?:choose|pick|select)))\s+\(?([A-Da-d])\)?'
+    r')',
+    re.IGNORECASE,
+)
+
+# ── Tier 2: Structural patterns (medium confidence) ──
+_TIER2_RE = re.compile(
+    r'(?:'
+    r'(?:选|选择)\s*\(?([A-Da-d])\)?'
+    r'|\b([A-Da-d])\s+is\s+(?:the\s+)?(?:correct|right|best)'
+    r'|(?:option|choice)\s+\(?([A-Da-d])\)?\s+is\s+(?:correct|right|best)'
+    r')',
+    re.IGNORECASE,
+)
+
+# ── Tier 3: Standalone letter on its own line ──
+_TIER3_RE = re.compile(r'^\s*\(?([A-Da-d])\)?[.。]?\s*$', re.MULTILINE)
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove <thinking>...</thinking> blocks from generated text."""
+    cleaned = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+    return cleaned.strip()
+
+
+def _extract_answer_letter(text: str) -> Optional[str]:
+    """Extract A/B/C/D answer letter from generated text.
+
+    4-tier priority extraction strategy:
+      Tier 0: First non-whitespace character (completion-style "Answer: D")
+      Tier 1: Explicit markers ("FINAL ANSWER: A", "the answer is B")
+      Tier 2: Structural patterns ("option C is correct", "选 D")
+      Tier 3: Standalone letter on its own line
+    No dangerous fallback — returns None if all tiers fail.
+    """
+    cleaned = _strip_thinking(text)
+    if not cleaned:
+        return None
+
+    # ── Tier 0: First-token extraction (completion-style models) ──
+    # After "Answer:" prompt, model often outputs " D\n\n..." as continuation
+    first_chars = cleaned.lstrip()[:3].strip()
+    if len(first_chars) >= 1 and first_chars[0].upper() in 'ABCD':
+        # Verify it's a standalone letter, not start of a word like "An" or "But"
+        if len(first_chars) == 1 or not first_chars[1].isalpha():
+            return first_chars[0].upper()
+
+    # ── Tier 1: Explicit answer markers (last match wins for CoT) ──
+    matches = _TIER1_RE.findall(cleaned)
+    if matches:
+        last_match = matches[-1]
+        for g in (last_match if isinstance(last_match, tuple) else [last_match]):
+            if g:
+                return g.upper()
+
+    # ── Tier 2: Structural patterns ──
+    matches = _TIER2_RE.findall(cleaned)
+    if matches:
+        last_match = matches[-1]
+        for g in (last_match if isinstance(last_match, tuple) else [last_match]):
+            if g:
+                return g.upper()
+
+    # ── Tier 3: Standalone letter on its own line ──
+    matches = _TIER3_RE.findall(cleaned)
+    if matches:
+        return matches[-1].upper()
+
+    # ── No match: return None (parse failure, do NOT guess) ──
+    logger.debug(
+        f"[Parser] Failed to extract answer from: {cleaned[:200]!r}"
+    )
+    return None
+
+
+@torch.inference_mode()
+def _generate_answer(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    prompt: str,
+    device: str,
+    max_new_tokens: int = 256,
+) -> str:
+    """Generate a text answer from the model.
+
+    Uses greedy decoding (temperature=0) for deterministic evaluation.
+    Applies chat template if available (critical for Instruct models).
+    """
+    # Apply chat template for Instruct/Chat models
+    if hasattr(tokenizer, 'apply_chat_template'):
+        messages = [{"role": "user", "content": prompt}]
+        text_input = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+        input_ids = tokenizer.encode(text_input, return_tensors="pt").to(device)
+    else:
+        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+
+    # Greedy decoding for reproducible evaluation
+    outputs = model.generate(
+        input_ids,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        temperature=1.0,  # ignored when do_sample=False
+        pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+    )
+    # Decode only the new tokens
+    generated_ids = outputs[0, input_ids.shape[1]:]
+    text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    return text
 
 
 # ─────────────────────────────────────────────────────
@@ -167,10 +290,15 @@ def evaluate_truthfulqa(
     max_questions: int = 200,
     device: Optional[str] = None,
 ) -> BenchmarkResult:
-    """Evaluate on TruthfulQA MC1 (single correct answer).
+    """Evaluate on TruthfulQA using **generative parsing**.
 
-    MC1: For each question, one answer is correct, rest are incorrect.
-    Model must assign highest log-likelihood to the correct answer.
+    MC1 (generative): Generate an answer, then fuzzy-match against the
+    correct choice text.  This avoids the log-likelihood blind spot
+    where models that emit <thinking> before the answer token get
+    mis-scored.
+
+    MC2: Still uses log-likelihood scoring (multi-correct, no single
+    generation target).
 
     Dataset: truthfulqa/truthful_qa (HuggingFace)
     """
@@ -210,25 +338,39 @@ def evaluate_truthfulqa(
         mc2_labels = example["mc2_targets"]["labels"]
         category = example.get("category", "unknown")
 
-        # Build prompt
-        prompt = f"Q: {question}\nA:"
+        # ── MC1: Generative evaluation ──
+        # Build a numbered-choice prompt so the model can reference by index
+        choice_lines = [f"  ({chr(65+i)}) {c}" for i, c in enumerate(mc1_choices)]
+        prompt = (
+            f"Q: {question}\n"
+            f"Choices:\n" + "\n".join(choice_lines) + "\n"
+            f"Answer with just the letter of the correct choice."
+        )
 
-        # MC1: single correct answer
-        scores = _score_completions(model, tokenizer, prompt, mc1_choices, device)
-        if scores:
-            best_idx = max(range(len(scores)), key=lambda i: scores[i])
-            correct = mc1_labels[best_idx] == 1
-            n_correct_mc1 += int(correct)
+        generated = _generate_answer(model, tokenizer, prompt, device, max_new_tokens=256)
+        pred_letter = _extract_answer_letter(generated)
 
-            if category not in by_category:
-                by_category[category] = []
-            by_category[category].append(correct)
+        correct = False
+        if pred_letter is not None:
+            pred_idx = ord(pred_letter) - ord('A')
+            if 0 <= pred_idx < len(mc1_labels):
+                correct = mc1_labels[pred_idx] == 1
+        else:
+            # Fallback: fuzzy-match generated text against choice strings
+            cleaned = _strip_thinking(generated).lower().strip()
+            correct_texts = [mc1_choices[i].lower() for i, l in enumerate(mc1_labels) if l == 1]
+            correct = any(ct in cleaned or cleaned in ct for ct in correct_texts if len(ct) > 3)
 
-        # MC2: multiple correct answers — compute normalized score
-        mc2_scores = _score_completions(model, tokenizer, prompt, mc2_choices, device)
+        n_correct_mc1 += int(correct)
+
+        if category not in by_category:
+            by_category[category] = []
+        by_category[category].append(correct)
+
+        # ── MC2: Log-likelihood scoring (multi-correct, no single answer) ──
+        mc2_prompt = f"Q: {question}\nA:"
+        mc2_scores = _score_completions(model, tokenizer, mc2_prompt, mc2_choices, device)
         if mc2_scores:
-            # MC2 accuracy: does model assign higher avg score to correct answers
-            # than incorrect answers?
             correct_scores = [
                 mc2_scores[i] for i, l in enumerate(mc2_labels) if l == 1
             ]
@@ -260,7 +402,7 @@ def evaluate_truthfulqa(
         sub_scores[f"cat_{cat}"] = sum(results) / len(results) if results else 0.0
 
     logger.info(
-        f"[Benchmark] TruthfulQA: MC1={accuracy_mc1:.1%} MC2={accuracy_mc2:.1%} "
+        f"[Benchmark] TruthfulQA (generative): MC1={accuracy_mc1:.1%} MC2={accuracy_mc2:.1%} "
         f"({n_total} questions)"
     )
 
@@ -314,7 +456,7 @@ def _format_mmlu_prompt(
     parts.append(f"{question}")
     for i, c in enumerate(choices):
         parts.append(f"{_MMLU_CHOICES[i]}. {c}")
-    parts.append("Answer:")
+    parts.append("Answer with just the letter (A, B, C, or D):")
 
     return "\n".join(parts)
 
@@ -327,9 +469,12 @@ def evaluate_mmlu(
     n_shot: int = 5,
     device: Optional[str] = None,
 ) -> BenchmarkResult:
-    """Evaluate on MMLU (Massive Multitask Language Understanding).
+    """Evaluate on MMLU using **generative parsing**.
 
-    Uses log-likelihood scoring over A/B/C/D tokens.
+    Generates a response for each question, then extracts the A/B/C/D
+    letter from the generated text using regex.  This handles models
+    that emit <thinking> blocks before the answer token.
+
     Supports few-shot prompting (default 5-shot).
 
     Dataset: cais/mmlu (HuggingFace)
@@ -349,15 +494,9 @@ def evaluate_mmlu(
     if n_subjects < len(_MMLU_SUBJECTS):
         subjects = rng.sample(_MMLU_SUBJECTS, n_subjects)
 
-    # Pre-tokenize choice labels for fast scoring
-    choice_ids = [
-        tokenizer.encode(f" {c}", add_special_tokens=False) for c in _MMLU_CHOICES
-    ]
-    # Use the last token of each choice encoding (handles BPE splitting)
-    choice_token_ids = [ids[-1] for ids in choice_ids]
-
     n_correct = 0
     n_total = 0
+    n_parse_fail = 0
     by_subject: Dict[str, Tuple[int, int]] = {}
 
     for subject in subjects:
@@ -394,17 +533,17 @@ def evaluate_mmlu(
             answer = example["answer"]  # int: 0-3
 
             prompt = _format_mmlu_prompt(question, choices, subject, few_shot)
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=True)
 
-            input_tensor = torch.tensor([prompt_ids], device=device)
-            outputs = model(input_ids=input_tensor, use_cache=False)
-            logits = outputs.logits[0, -1, :]  # Last position logits
+            # Generative evaluation: generate answer, extract letter
+            generated = _generate_answer(model, tokenizer, prompt, device, max_new_tokens=256)
+            pred_letter = _extract_answer_letter(generated)
 
-            # Score A/B/C/D by their token log-probs
-            choice_logits = torch.tensor(
-                [logits[tid].item() for tid in choice_token_ids]
-            )
-            predicted = choice_logits.argmax().item()
+            if pred_letter is not None:
+                predicted = ord(pred_letter) - ord('A')
+            else:
+                # Parse failure: count as wrong, log for diagnostics
+                predicted = -1
+                n_parse_fail += 1
 
             if predicted == answer:
                 subj_correct += 1
@@ -412,8 +551,6 @@ def evaluate_mmlu(
 
             subj_total += 1
             n_total += 1
-
-            del outputs, logits
 
         by_subject[subject] = (subj_correct, subj_total)
         subj_acc = subj_correct / max(subj_total, 1)
@@ -426,14 +563,16 @@ def evaluate_mmlu(
             torch.cuda.empty_cache()
 
     accuracy = n_correct / max(n_total, 1)
+    parse_fail_rate = n_parse_fail / max(n_total, 1)
     sub_scores = {
         subj: correct / max(total, 1)
         for subj, (correct, total) in by_subject.items()
     }
+    sub_scores["parse_fail_rate"] = parse_fail_rate
 
     logger.info(
-        f"[Benchmark] MMLU: {accuracy:.1%} ({n_correct}/{n_total}) "
-        f"across {len(by_subject)} subjects"
+        f"[Benchmark] MMLU (generative): {accuracy:.1%} ({n_correct}/{n_total}) "
+        f"across {len(by_subject)} subjects | parse_fail={n_parse_fail}/{n_total}"
     )
 
     return BenchmarkResult(

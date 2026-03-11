@@ -12,7 +12,7 @@ Fusion of signal processing and decision theory:
 import math
 import threading
 import collections
-from typing import Optional, List, Dict, Tuple
+from typing import List, Dict, Tuple
 
 from .types import Decision, ControllerConfig
 from .statistics import SlidingWindowStats

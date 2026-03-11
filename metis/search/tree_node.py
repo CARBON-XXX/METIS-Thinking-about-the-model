@@ -15,8 +15,8 @@ Memory model:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -79,7 +79,7 @@ class TreeNode:
         └── child_2 (high entropy → pruned)
     """
 
-    __slots__ = (
+    __slots__ = ("predictive_entropy_value", 
         "token_ids", "kv_cache", "parent", "children", "depth",
         "entropy", "z_score", "confidence", "cognitive_phase",
         "decision", "cusum_alarm", "entropy_gradient",
@@ -116,7 +116,7 @@ class TreeNode:
         self.decision = decision
         self.cusum_alarm = cusum_alarm
         self.entropy_gradient = entropy_gradient
-        self.predictive_entropy_value: Optional[float] = None  # Expected terminal entropy E[H(T)]
+        self.predictive_entropy_value = None  # Expected terminal entropy E[H(T)]
 
         # UCB1 statistics
         self.visit_count = 0

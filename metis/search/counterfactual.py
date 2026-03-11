@@ -33,12 +33,12 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
 
-from metis.search.tree_node import SearchConfig, clone_kv_cache
+from metis.search.tree_node import SearchConfig
 
 logger = logging.getLogger("metis.search")
 
@@ -334,9 +334,10 @@ class CounterfactualSimulator:
             if token_id.item() == self._tokenizer.eos_token_id:
                 break
 
-            # Next step
+            # Next step — ensure input_ids is [batch=1, seq=1]
+            next_input = token_id.view(1, 1)
             outputs = self._model(
-                input_ids=token_id.unsqueeze(0),
+                input_ids=next_input,
                 past_key_values=current_kv,
                 use_cache=True,
                 return_dict=True,

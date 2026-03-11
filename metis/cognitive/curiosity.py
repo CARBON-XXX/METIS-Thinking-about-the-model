@@ -10,11 +10,16 @@ Closed loop: detect confusion -> record -> targeted learning -> eliminate confus
 This is the infrastructure for AGI autonomous self-evolution (Self-Supervised Learning).
 """
 import json
+import logging
 from pathlib import Path
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
+
+import torch
 
 from ..core.types import KnowledgeGap
+
+_log = logging.getLogger(__name__)
 
 
 # ── Constants ──
@@ -238,3 +243,114 @@ class CuriosityDriver:
             ]
         except Exception:
             self._gaps = []
+
+    # ═══════════════════════════════════════════════════════════
+    # Phase 11: Real-Time Knowledge Gap Resolution
+    # ═══════════════════════════════════════════════════════════
+    # Closed loop: UNKNOWN → search query → retrieve → augment → DEEP re-gen
+
+    _QUERY_GEN_PROMPT = (
+        "I need to answer the following question but I'm not sure of the facts.\n\n"
+        "Question: {prompt}\n\n"
+        "What exact Google search query should I use to find the answer? "
+        "Output ONLY the search query, nothing else."
+    )
+
+    _RAG_PROMPT = (
+        "Background Context:\n{context}\n\n"
+        "User Query: {prompt}\n\n"
+        "Answer the query definitively based on the context above. "
+        "You MUST use deep reasoning. Cite specific facts from the context."
+    )
+
+    def resolve_gap(
+        self,
+        prompt: str,
+        probe_result: Any,
+        engine: Any,
+        retriever: Any,
+    ) -> Dict[str, Any]:
+        """Resolve an epistemic knowledge gap via retrieval-augmented deep reasoning.
+
+        Pipeline: Query Generation → Search → Augmented DEEP Generation
+
+        Args:
+            prompt: Original user query.
+            probe_result: ProbeResult from SemanticBoundaryProbe (epistemic_state == UNKNOWN).
+            engine: MetisInference instance.
+            retriever: BaseRetriever / ToolRetriever instance.
+
+        Returns:
+            Dict with keys: search_query, retrieved_context, result (InferenceResult),
+            gap (KnowledgeGap), resolved (bool).
+        """
+        _log.info(f"[CuriosityDriver] Resolving gap for: \"{prompt[:80]}\"")
+
+        # Step 1: Record the gap
+        gap = self.record_se_gap(
+            query=prompt,
+            semantic_entropy=probe_result.semantic_entropy,
+            n_clusters=probe_result.n_clusters,
+            n_samples=probe_result.n_samples,
+        )
+        _log.info(f"  Gap recorded: category={gap.category}, H={probe_result.semantic_entropy:.4f}")
+
+        # Step 2: Generate a precise search query via LLM
+        search_query = self._generate_search_query(prompt, engine)
+        _log.info(f"  Search query: \"{search_query}\"")
+
+        # Step 3: Retrieve external knowledge
+        retrieved = retriever.search_text(search_query)
+        if not retrieved:
+            # Fallback: search with original prompt
+            retrieved = retriever.search_text(prompt)
+        _log.info(f"  Retrieved: {len(retrieved)} chars")
+
+        # Step 4: Augmented DEEP generation
+        augmented_prompt = self._RAG_PROMPT.format(
+            context=retrieved if retrieved else "(No external context found.)",
+            prompt=prompt,
+        )
+        _log.info("  Running augmented cognitive generation...")
+        result = engine.generate_cognitive(augmented_prompt)
+        _log.info(f"  Route: {result.cognitive_route}, tokens: {result.tokens_generated}")
+
+        # Step 5: Mark resolved
+        self.mark_resolved(prompt)
+        _log.info("  Gap marked resolved ✓")
+
+        return {
+            "search_query": search_query,
+            "retrieved_context": retrieved,
+            "result": result,
+            "gap": gap,
+            "resolved": True,
+        }
+
+    @torch.no_grad()
+    def _generate_search_query(self, prompt: str, engine: Any) -> str:
+        """Use the LLM to generate a precise search query for retrieval."""
+        model = engine._metis.model
+        tokenizer = engine._metis.tokenizer
+
+        messages = [
+            {"role": "user", "content": self._QUERY_GEN_PROMPT.format(prompt=prompt)},
+        ]
+        input_ids = tokenizer.apply_chat_template(
+            messages, tokenize=True, return_tensors="pt",
+            add_generation_prompt=True,
+        ).to(model.device)
+        attn = torch.ones_like(input_ids)
+
+        output_ids = model.generate(
+            input_ids, attention_mask=attn,
+            max_new_tokens=32, do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        raw = tokenizer.decode(
+            output_ids[0, input_ids.shape[1]:], skip_special_tokens=True
+        ).strip()
+
+        # Clean: take first line, strip quotes
+        query = raw.split("\n")[0].strip().strip('"').strip("'")
+        return query

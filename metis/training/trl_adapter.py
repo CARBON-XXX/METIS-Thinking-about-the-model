@@ -22,9 +22,8 @@ Usage:
 """
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from ..core.types import CognitiveTrace
 from .rewards import CognitiveRewardComputer, RewardBreakdown, RewardConfig
@@ -190,8 +189,8 @@ class MetisRewardFunction:
             )
 
         # Run METIS-instrumented inference to get cognitive trace
-        result = self._inference.generate(prompt)
-        trace = self._inference._metis.get_trace()
+        result = self._inference.generate_cognitive(prompt)
+        trace = self._inference._metis.trace
         reward = self._computer.compute(trace)
         return reward.total
 

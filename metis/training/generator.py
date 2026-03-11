@@ -12,10 +12,9 @@ Usage:
 """
 from __future__ import annotations
 
-import gc
 import math
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -247,7 +246,12 @@ class MetisGenerator:
             if token_id == self._tokenizer.eos_token_id:
                 break
 
-        del past_key_values, logits, outputs
+        # Safe cleanup: 'outputs' / 'logits' may not be assigned
+        # if EOS was generated at step 0 via the first_logits fast path
+        try:
+            del past_key_values, logits, outputs
+        except UnboundLocalError:
+            pass
 
         generated_text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
 

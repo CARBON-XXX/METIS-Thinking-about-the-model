@@ -1,9 +1,9 @@
 """
 METIS Core Types
 """
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, List, Callable, Any, Tuple, Dict
+from typing import Optional, List, Any, Tuple, Dict
 import json
 
 
@@ -400,8 +400,14 @@ class InferenceResult:
     system2_ratio: float = 0.0          # DEEP token ratio
     system2_triggered: bool = False     # Whether System 2 verification was triggered
 
+    # Cognitive routing (DPO model deterministic state machine)
+    cognitive_route: str = ""           # "DEEP" | "FAST" | "FAST (Implicit)" | ""
+    thinking_repaired: bool = False     # Whether </thinking> closure was auto-repaired
+    raw_output: str = ""                # Original model output before parsing (debug)
+
     # Behavioral record
     boundary_interventions: int = 0     # Boundary guard intervention count
+    rag_injections: int = 0            # Number of RAG context injections during generation
     was_hedged: bool = False            # Whether answer was hedged with uncertainty
     was_refused: bool = False           # Whether answer was refused
     was_verified: bool = False          # Whether SE verification ran
