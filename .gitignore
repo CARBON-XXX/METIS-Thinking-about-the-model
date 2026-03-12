@@ -136,7 +136,9 @@ REPRODUCIBILITY.md
 # Old package (migrated to metis/)
 sedac/
 
+# Paper (kept locally, not tracked)
+paper/
+
 # Paper submission archives (local only)
 metis-arxiv-submission.tar.gz
 metis-paper-submission.zip
-paper/METIS-arXiv.pdf
