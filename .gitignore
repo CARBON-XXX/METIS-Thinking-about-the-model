@@ -2,6 +2,7 @@
 data/
 !data/golden_anchor.jsonl
 *.json
+!tools/seek_trace.json
 
 # Cache
 cache/
