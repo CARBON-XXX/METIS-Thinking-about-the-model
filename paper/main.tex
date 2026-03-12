@@ -62,7 +62,7 @@
 % ABSTRACT
 % ═══════════════════════════════════════════════════════════════════════
 \begin{abstract}
-We present \metis{}, a metacognitive inference-scaling framework that dynamically allocates computational depth based on real-time token-level entropy monitoring. Unlike fixed chain-of-thought (CoT) prompting or uniform self-consistency sampling, \metis{} routes each query through one of four cognitive pathways---\textsc{Fast}, \textsc{Normal}, \textsc{Deep}, or \textsc{Seek}---determined by an exponentially-weighted entropy signal processed through a Rust-native decision boundary. On a 100-question mixed math/logic benchmark, \metis{} achieves \textbf{96\% accuracy} at only \textbf{53.4 average tokens per request}, dominating the Pareto frontier against zero-shot (90\%, 12.4 tok), forced CoT (91\%, 156.0 tok), and self-consistency $k{=}5$ (94\%, 864.5 tok). We provide three independent lines of evidence: (1)~a bimodal token distribution proof ($\Delta\text{BIC}=40.6$, $\text{BC}=0.754$) refuting the short-answer cheating hypothesis; (2)~a $6\times$ latency speedup via Rust-native entropy computation with 99.1\% decision agreement; and (3)~cross-benchmark generalization on GSM8K and TruthfulQA. All experiments are conducted on a single NVIDIA GB10 (Blackwell, 128\,GB unified memory) using vLLM with PagedAttention for reproducible, VRAM-saturated inference.
+We present \metis{}, a metacognitive inference-scaling framework that dynamically allocates computational depth based on real-time token-level entropy monitoring. Unlike fixed chain-of-thought (CoT) prompting or uniform self-consistency sampling, \metis{} routes each query through one of four cognitive pathways---\textsc{Fast}, \textsc{Normal}, \textsc{Deep}, or \textsc{Seek}---determined by an exponentially-weighted entropy signal processed through a Rust-native decision boundary. On a 100-question mixed math/logic benchmark, \metis{} achieves \textbf{96\% accuracy} at only \textbf{53.4 average tokens per request}, outperforming zero-shot (90\%, 12.4 tok), forced CoT (91\%, 156.0 tok), and self-consistency $k{=}5$ (94\%, 864.5 tok) on the accuracy--cost Pareto frontier. We provide three independent lines of evidence: (1)~a bimodal token distribution proof ($\Delta\text{BIC}=40.6$, $\text{BC}=0.754$) refuting the short-answer cheating hypothesis; (2)~a $6\times$ latency speedup via Rust-native entropy computation with 99.1\% decision agreement; and (3)~cross-benchmark generalization on GSM8K and TruthfulQA. All experiments are conducted on a single NVIDIA GB10 (Blackwell, 128\,GB unified memory) using vLLM with PagedAttention for reproducible, VRAM-saturated inference.
 \end{abstract}
 
 % ═══════════════════════════════════════════════════════════════════════
@@ -73,17 +73,17 @@ We present \metis{}, a metacognitive inference-scaling framework that dynamicall
 
 Large language models (LLMs) face a fundamental efficiency dilemma: simple factual queries receive the same computational budget as complex multi-step reasoning problems. Chain-of-thought prompting~\citep{wei2022chain} uniformly forces deliberation, inflating token costs on trivial questions. Self-consistency~\citep{wang2022self} multiplies this overhead by a factor of $k$. Neither approach adapts compute to problem difficulty.
 
-\metis{} resolves this by introducing a \emph{systems-level inference control protocol} that monitors the model's own uncertainty in real time. Rather than a prompting heuristic, \metis{} operates as a metacognitive control loop embedded directly in the serving pipeline. The key insight is that token-level entropy---specifically, the entropy of the next-token probability distribution---serves as a reliable proxy for problem difficulty. When entropy is low, the model is confident and can answer directly (\textsc{Fast} route), reclaiming GPU SM cycles and KV-cache capacity for concurrent requests. When entropy spikes, the model is uncertain and benefits from extended reasoning (\textsc{Deep} route).
+\metis{} addresses this with an inference control loop that monitors the model's own uncertainty in real time. Rather than a prompting strategy, \metis{} operates as a metacognitive controller embedded in the serving pipeline. The core observation is that token-level entropy---the entropy of the next-token distribution---is a practical proxy for query difficulty. Low entropy indicates confidence, allowing the model to answer directly (\textsc{Fast} route) and free KV-cache capacity for other requests. High entropy signals uncertainty and triggers extended reasoning (\textsc{Deep} route).
 
-Recent advances in uncertainty quantification---notably Semantic Entropy~\citep{kuhn2023semantic}---achieve highly accurate epistemic state classification by generating $K$ full sequences and performing $O(K^2)$ pairwise entailment checks. While powerful for post-hoc evaluation, this imposes a catastrophic computational overhead: for $K{=}5$ samples with a 7B model, a single uncertainty estimate requires $5\times$ the base generation cost plus quadratic NLI scoring, rendering it physically impossible for real-time, intra-generation routing. \metis{} circumvents this theoretical deadlock by applying physical signal processing to the \emph{free, instantaneous} token-level logits available at every decoding step. By coupling an EWMA low-pass filter with a Rust-accelerated $O(1)$ CUSUM change-point detector, \metis{} extracts the underlying ``epistemic phase transition'' signal from noisy lexical entropy---recovering robust uncertainty detection within a $1.3\,\mu$s latency budget, strictly during the prefill and decoding phases.
+Semantic Entropy~\citep{kuhn2023semantic} achieves accurate epistemic state classification by generating $K$ full sequences and performing $O(K^2)$ pairwise entailment checks. While effective for offline evaluation, this cost is prohibitive for real-time serving: $K{=}5$ samples with a 7B model require $5\times$ the base generation cost plus quadratic NLI scoring. \metis{} sidesteps this by processing the token-level logits already available at every decoding step. An EWMA low-pass filter combined with a Rust-accelerated $O(1)$ CUSUM change-point detector extracts a stable difficulty signal from noisy per-token entropy, yielding a routing decision within a $1.3\,\mu$s budget.
 
 Our contributions are:
 \begin{enumerate}[leftmargin=*,itemsep=2pt]
     \item \textbf{Entropy-triggered routing}: A four-tier cognitive architecture (\textsc{Fast}/\textsc{Normal}/\textsc{Deep}/\textsc{Seek}) driven by exponentially-weighted moving average (EWMA) entropy with CUSUM change-point detection.
     \item \textbf{Rust-native acceleration}: A compiled decision boundary achieving $6\times$ speedup over pure Python at p50 latency, enabling real-time routing without inference overhead.
     \item \textbf{Pareto dominance}: \metis{} simultaneously maximizes accuracy and minimizes token cost, a result we prove is not attributable to output truncation via bimodal distribution analysis.
-    \item \textbf{KL-Sentinel training guard}: An automatic rollback mechanism that halts DPO fine-tuning when KL divergence exceeds a safety threshold, preventing catastrophic forgetting.
-    \item \textbf{Systems-level serving integration}: End-to-end evaluation as an inference control protocol within vLLM's continuous batching pipeline, demonstrating macroeconomic compute arbitrage under realistic workload traces.
+    \item \textbf{KL-Sentinel training guard}: An automatic rollback mechanism that halts DPO fine-tuning when KL divergence exceeds a safety threshold, preventing policy degradation.
+    \item \textbf{Systems-level serving integration}: End-to-end evaluation as an inference control protocol within vLLM's continuous batching pipeline, demonstrating throughput and latency gains under realistic workload traces.
 \end{enumerate}
 
 % ═══════════════════════════════════════════════════════════════════════
@@ -124,7 +124,7 @@ where $\mathcal{V}$ is the vocabulary. We maintain an exponentially-weighted mov
     \label{eq:ewma}
 \end{equation}
 
-Critically, the EWMA acts as a \emph{low-pass filter} on the raw entropy signal: high-frequency lexical noise---arising from tokenization artifacts, enumerated lists, or proper noun boundaries---is smoothed out, isolating the underlying \emph{epistemic phase transition} associated with genuine model uncertainty. Without this filtering, static thresholds on $H_t$ would fire spuriously on benign lexical structure.
+The EWMA acts as a low-pass filter on the raw entropy signal, smoothing out high-frequency lexical noise from tokenization artifacts, enumerated lists, and proper noun boundaries. This isolates sustained shifts in model uncertainty from transient fluctuations. Without this filtering, static thresholds on $H_t$ would trigger spuriously on benign lexical structure.
 
 A CUSUM (Cumulative Sum) change-point detector monitors $\bar{H}_t$ for sustained shifts:
 \begin{equation}
@@ -143,7 +143,7 @@ where $\mu_0$ is the running mean entropy and $\delta$ is a slack parameter. The
     \label{eq:route}
 \end{equation}
 
-Crucially, if $\bar{H}_t$ remains above a critical threshold $\tau_{\text{crit}}$ despite allocation to the \textsc{Deep} route, compute alone cannot resolve the epistemic deficit (e.g., missing factual knowledge). In such cases, \metis{} halts generation and triggers a \textsc{Seek} route, executing an autonomous external tool invocation (e.g., retrieval-augmented generation) to inject external negative entropy into the context window. This four-tier architecture---\textsc{Fast}/\textsc{Normal}/\textsc{Deep}/\textsc{Seek}---ensures that \metis{} degrades gracefully from compute-bound to knowledge-bound uncertainty.
+If $\bar{H}_t$ remains above a critical threshold $\tau_{\text{crit}}$ despite allocation to the \textsc{Deep} route, additional compute cannot resolve the uncertainty---typically because the required knowledge is absent from the training data. In such cases, \metis{} halts generation and triggers a \textsc{Seek} route, dispatching an external tool call (e.g., web search) to inject grounding context into the generation window. The four tiers---\textsc{Fast}/\textsc{Normal}/\textsc{Deep}/\textsc{Seek}---cover the spectrum from confident recall through deliberative reasoning to knowledge retrieval.
 
 \subsection{Rust-Native Decision Boundary}
 \label{sec:rust}
@@ -153,16 +153,16 @@ The entropy computation and CUSUM update (\cref{eq:ewma,eq:cusum}) are implement
 \subsection{Continuous Evolution: The Dreaming Daemon}
 \label{sec:dreaming}
 
-\metis{} is not a static routing heuristic but a \emph{continuous learning} architecture. High-entropy queries identified during daytime serving---those routed to \textsc{Deep} or \textsc{Seek}---represent the system's current epistemic gaps. These queries are archived in a structured gap ledger.
+Beyond static routing, \metis{} includes a continuous learning component. Queries that triggered \textsc{Deep} or \textsc{Seek} routes during serving represent the system's current knowledge gaps. These queries are recorded in a structured gap ledger.
 
-During idle computational cycles (e.g., nightly off-peak windows), a background daemon compiles these archived queries, generates high-quality reasoning trajectories using the \textsc{Deep}/\textsc{Seek} routes with extended compute budgets, and dynamically blends them with a verified golden dataset at a strict 20/80 ratio (20\% novel gap-derived trajectories, 80\% golden anchor data). This blending ratio is empirically chosen to maximize learning from new epistemic territory while preventing catastrophic drift from the anchor distribution.
+During idle periods (e.g., nightly off-peak windows), a background daemon processes these queries: it generates reasoning trajectories using the \textsc{Deep}/\textsc{Seek} routes with extended compute budgets and blends them with a verified golden dataset at a 20/80 ratio (20\% gap-derived trajectories, 80\% anchor data). This ratio balances learning from new material against drift from the reference distribution.
 
-The resulting dataset is used to perform continuous DPO updates on the base model, progressively shifting previously high-entropy queries into the \textsc{Fast} routing domain. Over successive nightly cycles, the model's entropy landscape is reshaped: queries that once triggered deliberative reasoning become low-entropy factual recall, reducing average token cost without sacrificing accuracy.
+The blended dataset is used for periodic DPO updates, progressively shifting previously high-entropy queries into the \textsc{Fast} domain. Over successive training cycles, queries that once required deliberative reasoning become low-entropy factual recall, reducing average token cost without sacrificing accuracy.
 
 \subsection{KL-Sentinel Training Guard}
 \label{sec:kl}
 
-The Dreaming Daemon's continuous training pipeline requires a physical safety valve to prevent unbounded policy drift. During each DPO fine-tuning iteration, we monitor the KL divergence between the policy $\pi_\theta$ and the anchor reference model $\pi_{\text{ref}}$ on a held-out canary set. If $D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}}) > 0.15$ nats at any epoch checkpoint, training is automatically rolled back to the previous checkpoint. This sentinel mechanism ensures that the Dreaming Daemon's autonomous evolution remains bounded: the model improves on its epistemic gaps without catastrophic forgetting of its established competencies.
+The continuous training pipeline requires a guard against unbounded policy drift. During each DPO iteration, we monitor the KL divergence between the current policy $\pi_\theta$ and the anchor model $\pi_{\text{ref}}$ on a held-out canary set. If $D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}}) > 0.15$ nats at any checkpoint, training is rolled back to the previous checkpoint. This prevents the model from improving on its knowledge gaps at the expense of its existing competencies.
 
 % ═══════════════════════════════════════════════════════════════════════
 % 4. EXPERIMENTS
@@ -198,7 +198,7 @@ Self-Consistency $k{=}5$ & 94.0 &  94 &  864.5 &  86{,}449 & 313.9 & 275.4 \\
 
 \metis{} routes 48 requests via \textsc{Fast} ($<30$ tokens) and 52 via \textsc{Normal}/\textsc{Deep} (50--149 tokens), achieving a $16.2\times$ token reduction over self-consistency while gaining 2 percentage points of accuracy.
 
-To refute the hypothesis that the \textsc{Fast} route acts as a ``lazy'' mechanism producing short but incorrect outputs, we conduct a worst-case boundary analysis. \metis{} routes 48 requests to \textsc{Fast} and achieves a global accuracy of 96\% (4 total errors). Even under the absolute worst-case assumption where all 4 errors occur within the \textsc{Fast} routing subset, the conditional accuracy $P(\text{Correct} \mid \textsc{Fast})$ remains bounded at a rigorous $91.7\%$ ($44/48$). This mathematically proves that outputs in the low-entropy regime are highly accurate direct answers, not degraded approximations.
+To refute the hypothesis that the \textsc{Fast} route acts as a ``lazy'' mechanism producing short but incorrect outputs, we conduct a worst-case boundary analysis. \metis{} routes 48 requests to \textsc{Fast} and achieves a global accuracy of 96\% (4 total errors). Even under the absolute worst-case assumption where all 4 errors occur within the \textsc{Fast} routing subset, the conditional accuracy $P(\text{Correct} \mid \textsc{Fast})$ remains bounded at a rigorous $91.7\%$ ($44/48$). This shows that outputs in the low-entropy regime are accurate direct answers, not degraded approximations.
 
 \begin{figure}[ht]
 \centering
@@ -275,7 +275,7 @@ We benchmark the core \metis{} operations---\texttt{update\_decide} (entropy EWM
 
 The Rust backend achieves a $6\times$ speedup on the critical-path \texttt{update\_decide} operation. Note that \texttt{get\_stats} is faster in Python due to NumPy's optimized array operations on the statistics buffer; this operation is not on the per-token critical path. The routing decision distributions are nearly identical: Rust produces \{NORMAL: 771, FAST: 222, DEEP: 7\} vs.\ Python \{NORMAL: 778, FAST: 220, DEEP: 2\}, with 99.1\% agreement.
 
-\paragraph{Amdahl's Law perspective.} We acknowledge that at $1.3\,\mu$s per decision, the entropy routing overhead is negligible compared to vLLM's end-to-end per-token latency ($\sim$$5$--$10$\,ms). Under Amdahl's Law, the wall-clock impact of the $6\times$ Rust speedup is therefore modest for single-request serving. However, in high-QPS clustered deployments where the control plane issues synchronous CUDA kernel dispatches across hundreds of concurrent requests, sub-microsecond decision latency provides critical \emph{clock-cycle headroom} that prevents control-plane blocking. The Rust implementation thus future-proofs the architecture for production-scale deployment.
+\paragraph{Amdahl's Law perspective.} At $1.3\,\mu$s per decision, routing overhead is negligible relative to vLLM's per-token latency ($\sim$$5$--$10$\,ms), so the wall-clock impact of the $6\times$ speedup is modest for single-request serving. The benefit materialises under high concurrency: when the control plane issues synchronous routing decisions across hundreds of concurrent requests, sub-microsecond latency prevents the decision step from becoming a bottleneck.
 
 \subsubsection{KL-Sentinel Collapse Prevention}
 
@@ -339,7 +339,7 @@ On GSM8K, the baseline's explicit ``solve step by step'' instruction outperforms
 
 To validate \metis{} as a production-ready inference control protocol---not merely a prompting heuristic---we evaluate system-level throughput and latency under real-world workload traces (ShareGPT, $n{=}2000$). We simulate high-concurrency environments using a Poisson arrival process against the vLLM asynchronous engine.
 
-Unlike static benchmarks, this evaluates the true macroeconomic compute arbitrage of \metis{}: by dynamically routing low-entropy queries to the \textsc{Fast} path, \metis{} reclaims GPU SM cycles and PagedAttention KV-cache blocks, physically increasing the global generation throughput (Tokens/s) and suppressing P99 Time-To-First-Token (TTFT) latency.
+By routing low-entropy queries to the \textsc{Fast} path, \metis{} releases KV-cache blocks earlier, freeing capacity for concurrent requests. This section measures whether that per-request saving translates into measurable throughput and tail-latency improvements at the system level.
 
 \begin{table}[ht]
 \centering
@@ -395,11 +395,11 @@ Unlike static benchmarks, this evaluates the true macroeconomic compute arbitrag
 \legend{Vanilla, \metis{}}
 \end{axis}
 \end{tikzpicture}
-\caption{TTFT latency under Poisson-arrival ShareGPT workload ($n{=}200$ per QPS level). (a)~P50 (median): \metis{} consistently reduces median TTFT by 4--18\%. (b)~P99 (tail): at QPS${=}8$, Vanilla exhibits a catastrophic $5.4\times$ tail spike while \metis{} remains stable at 1{,}962\,ms---a $2.7\times$ tail compression attributable to early \textsc{Fast}-path KV-cache release.}
+\caption{TTFT latency under Poisson-arrival ShareGPT workload ($n{=}200$ per QPS level). (a)~P50 (median): \metis{} reduces median TTFT by 4--18\%. (b)~P99 (tail): at QPS${=}8$, Vanilla shows a $5.4\times$ tail spike while \metis{} holds at 1{,}962\,ms---a $2.7\times$ reduction from early \textsc{Fast}-path KV-cache release.}
 \label{fig:latency}
 \end{figure}
 
-At low concurrency (QPS${\leq}4$), both configurations operate within the engine's capacity envelope and throughput scales linearly with arrival rate. The critical divergence emerges at QPS${=}8$: Vanilla vLLM suffers a catastrophic P99 TTFT spike to $5{,}372$\,ms as long-running 512-token generations saturate the KV-cache, forcing new requests into queueing. \metis{} Dynamic avoids this collapse entirely---by terminating 48\% of requests after $\leq 50$ tokens, it continuously releases PagedAttention blocks back to the scheduler, maintaining P99 TTFT at $1{,}962$\,ms ($2.7\times$ tail compression). At the highest tested load (QPS${=}16$), \metis{} sustains $199.9$\,tok/s with a P99 TTFT of $2{,}082$\,ms, compared to Vanilla's $274.0$\,tok/s at $2{,}232$\,ms. While Vanilla achieves higher raw throughput (it generates more tokens per request by design), \metis{} delivers equivalent \emph{useful} throughput at significantly lower tail latency---the operative metric for production SLO compliance.
+At low concurrency (QPS${\leq}4$), both configurations operate within the engine's capacity and throughput scales linearly. The difference appears at QPS${=}8$: Vanilla vLLM sees a P99 TTFT spike to $5{,}372$\,ms as long-running 512-token generations fill the KV-cache, queuing new requests. \metis{} avoids this by terminating 48\% of requests after $\leq 50$ tokens, releasing PagedAttention blocks back to the scheduler and holding P99 TTFT at $1{,}962$\,ms ($2.7\times$ lower). At QPS${=}16$, \metis{} sustains $199.9$\,tok/s with P99 TTFT of $2{,}082$\,ms, versus Vanilla's $274.0$\,tok/s at $2{,}232$\,ms. Vanilla achieves higher raw throughput because it generates more tokens per request, but \metis{} delivers comparable useful throughput at lower tail latency---the more relevant metric for production SLO compliance.
 
 % ═══════════════════════════════════════════════════════════════════════
 % 5. DISCUSSION
@@ -408,16 +408,16 @@ At low concurrency (QPS${\leq}4$), both configurations operate within the engine
 \label{sec:discussion}
 
 \paragraph{When does \metis{} help most?}
-The Pareto results (\cref{sec:pareto}) show \metis{} excels on \emph{mixed-difficulty} workloads where the entropy signal provides maximal discrimination. On uniformly-difficult benchmarks like GSM8K, the benefit shifts from accuracy to efficiency (21\% token reduction). This is consistent with the information-theoretic interpretation: entropy-based routing has zero value when all queries have identical difficulty.
+The Pareto results (\cref{sec:pareto}) show \metis{} is most effective on \emph{mixed-difficulty} workloads where the entropy signal has discriminative power. On uniformly-difficult benchmarks like GSM8K, the benefit shifts from accuracy to efficiency (21\% token reduction). When all queries have similar difficulty, entropy-based routing provides little separation.
 
 \paragraph{Self-consistency degradation.}
 Self-consistency $k{=}5$ achieves 94\% accuracy when equipped with semantic equivalence clustering for majority voting (normalizing diverse answer formats like ``Au'' vs.\ ``Gold'' vs.\ ``The chemical symbol for gold is Au'' into canonical forms before counting). Without this normalization, na\"ive string-matching voting degrades to 64\%---a known fragmentation failure mode~\citep{wang2022self}. Even with proper normalization, self-consistency requires $16.2\times$ more tokens than \metis{} (864.5 vs.\ 53.4) for 2 fewer percentage points of accuracy, confirming \metis{}'s Pareto dominance.
 
 \paragraph{Compute-Normalized Accuracy on GSM8K.}
-The 6\% accuracy gap on GSM8K (\cref{tab:generalization}) merits careful interpretation. The baseline achieves 88\% using an average of 260.1 tokens per request with an explicit ``solve step by step'' instruction. If the baseline model's compute budget were forcefully truncated to match \metis{}'s 205.2 tokens (via \texttt{max\_new\_tokens=205}), its accuracy would collapse catastrophically---the model would frequently fail to reach the final numerical answer within the truncated generation window. Under this \emph{compute-normalized} lens, \metis{} remains Pareto-optimal: it achieves 82\% accuracy within a bounded physical compute envelope that the baseline cannot survive. The accuracy gap is therefore not a quality regression but a \emph{compute allocation trade-off} that \metis{} makes explicitly via entropy-based routing.
+The 6\% accuracy gap on GSM8K (\cref{tab:generalization}) requires context. The baseline achieves 88\% using 260.1 tokens on average with an explicit ``solve step by step'' instruction. If the baseline were truncated to match \metis{}'s 205.2-token budget (via \texttt{max\_new\_tokens=205}), many responses would be cut off before reaching the final numerical answer. Under this compute-matched comparison, \metis{} achieves 82\% accuracy within a tighter token budget that the unmodified baseline cannot operate in. The gap is better understood as a compute allocation trade-off than a quality regression.
 
 \paragraph{Model-Agnostic Entropy Dynamics.}
-While full continuous learning lifecycle evaluations were bounded to the 7B parameter class due to hardware topology, preliminary universal scaling matrices confirm that the CUSUM trigger logic generalizes to larger model families (e.g., Qwen-32B and Llama-3-8B). Because the Siegmund CUSUM detector integrates over the first derivative of the EWMA signal rather than relying on absolute entropy values, it naturally calibrates to the differing base epistemic noise floors of heterogeneous architectures. Comprehensive cross-family validation remains a vector for future scaling research.
+Full continuous learning evaluations were limited to the 7B parameter class due to hardware constraints. Preliminary scaling experiments confirm that the CUSUM trigger logic transfers to larger models (Qwen-32B) and different families (Llama-3-8B). Because the CUSUM detector operates on the drift rate of the EWMA signal rather than absolute entropy values, it adapts to the different baseline entropy levels of different architectures. Broader cross-family validation is left to future work.
 
 \paragraph{Limitations.}
 The current implementation routes at the \emph{prompt} level, not the \emph{token} level. A more fine-grained approach could dynamically expand reasoning mid-generation. Additionally, our KL-Sentinel simulation uses synthetic KL trajectories; production deployment requires online monitoring during actual training.
@@ -428,7 +428,7 @@ The current implementation routes at the \emph{prompt} level, not the \emph{toke
 \section{Conclusion}
 \label{sec:conclusion}
 
-\metis{} demonstrates that real-time entropy monitoring enables a viable systems-level inference control protocol, not merely a prompting heuristic. By routing queries through difficulty-appropriate computational pathways, \metis{} achieves 96\% accuracy at 53.4 tokens per request---a Pareto-dominant result over all tested baselines. The bimodal token distribution ($\Delta\text{BIC}=40.6$) provides mathematical proof of selective reasoning rather than output truncation. The Rust-native decision boundary adds negligible latency ($1.3\,\mu$s at p50), making \metis{} deployable as a drop-in middleware within production vLLM serving pipelines. By reclaiming GPU SM cycles and PagedAttention KV-cache blocks on \textsc{Fast}-routed queries, \metis{} converts per-request token savings into global throughput gains---a macroeconomic compute arbitrage invisible to static accuracy benchmarks. Future work will extend \metis{} to token-level adaptive depth, multi-model routing, and comprehensive system-level evaluation under high-concurrency production workloads.
+\metis{} shows that real-time entropy monitoring can serve as a practical inference control mechanism, not just a prompting technique. By routing queries through difficulty-appropriate computational pathways, \metis{} achieves 96\% accuracy at 53.4 tokens per request, outperforming all tested baselines on the accuracy--cost frontier. The bimodal token distribution ($\Delta\text{BIC}=40.6$) confirms selective reasoning rather than output truncation. The Rust-native decision boundary adds $1.3\,\mu$s at p50, making it compatible with production vLLM serving. Under load, early termination of \textsc{Fast}-routed queries frees KV-cache blocks for other requests, yielding $2.7\times$ P99 tail-latency reduction at QPS${=}8$---a system-level benefit not captured by per-request accuracy metrics. Future work will explore token-level adaptive depth, multi-model routing, and broader production workload evaluation.
 
 % ═══════════════════════════════════════════════════════════════════════
 % ACKNOWLEDGMENTS
@@ -519,13 +519,13 @@ To validate that the \metis{} routing signal generalises beyond the 7B parameter
 \end{table}
 
 \paragraph{Epistemic Sharpening.}
-At 32B parameters, the model's next-token distribution sharpens dramatically: mean EWMA entropy drops from $0.61 \to 0.31$ on complex prompts (a $49\%$ reduction). The 32B model is \emph{intrinsically confident}---it has internalised sufficient world knowledge that even multi-step derivations (e.g.\ ``Derive the quadratic formula'') produce low-entropy token streams ($\bar{H}=0.13$). This is consistent with the \emph{emergent epistemic calibration} observed in Phase~17 universal scaling experiments, where the 72B model spontaneously routed 96\% of complex tasks to DEEP thinking without any routing-specific fine-tuning.
+At 32B parameters, the next-token distribution becomes notably sharper: mean EWMA entropy drops from $0.61 \to 0.31$ on complex prompts (a $49\%$ reduction). The larger model is confident enough that even multi-step derivations (e.g.\ ``Derive the quadratic formula'') produce low-entropy token streams ($\bar{H}=0.13$). This aligns with the scaling behaviour observed in our universal matrix experiments, where the 72B model routed 96\% of complex tasks to DEEP without any routing-specific fine-tuning.
 
 \paragraph{CUSUM Stability.}
-Critically, the CUSUM detector fires \textbf{zero false positives} at 32B---no spurious phase-transition alerts on any of the 20 probes. The Siegmund sequential test correctly identifies that the 32B entropy streams are stationary (no sustained drift), confirming that the CUSUM statistic $S_t = \max(0, S_{t-1} + \tilde{H}_t - \bar{H}_{\text{EWMA}} - \delta)$ remains well below $\tau{=}2.0$ across all decode trajectories.
+The CUSUM detector fires zero false positives at 32B---no spurious alerts on any of the 20 probes. The sequential test correctly identifies that the 32B entropy streams are stationary (no sustained drift), with $S_t = \max(0, S_{t-1} + \tilde{H}_t - \bar{H}_{\text{EWMA}} - \delta)$ remaining well below $\tau{=}2.0$ across all decode trajectories.
 
 \paragraph{Threshold Recalibration.}
-The compressed entropy gap at 32B implies that deploying \metis{} on larger models requires \emph{scale-adaptive threshold recalibration}: the \textsc{Fast} ceiling $\tau_F$ and \textsc{Deep} floor $\tau_D$ must be lowered proportionally to the base model's intrinsic entropy floor. We propose a simple calibration protocol: run $N{=}20$ prompts (10 simple, 10 complex), compute $\bar{H}_{\text{simple}}$ and $\bar{H}_{\text{complex}}$, and set $\tau_F = \bar{H}_{\text{simple}} + \sigma_{\text{simple}}$ and $\tau_D = \bar{H}_{\text{complex}} - \sigma_{\text{complex}}$. For the 32B model, this yields $\tau_F \approx 0.53$ and $\tau_D \approx 0.19$---significantly below the 7B calibration ($\tau_F{=}0.8$, $\tau_D{=}1.2$) but preserving the mathematical structure of the routing bifurcation.
+The compressed entropy gap at 32B means that deploying \metis{} on larger models requires threshold recalibration: the \textsc{Fast} ceiling $\tau_F$ and \textsc{Deep} floor $\tau_D$ must be lowered to match the model's lower baseline entropy. A simple calibration protocol suffices: run $N{=}20$ prompts (10 simple, 10 complex), compute $\bar{H}_{\text{simple}}$ and $\bar{H}_{\text{complex}}$, and set $\tau_F = \bar{H}_{\text{simple}} + \sigma_{\text{simple}}$ and $\tau_D = \bar{H}_{\text{complex}} - \sigma_{\text{complex}}$. For the 32B model, this gives $\tau_F \approx 0.53$ and $\tau_D \approx 0.19$---well below the 7B values ($\tau_F{=}0.8$, $\tau_D{=}1.2$) but preserving the same routing structure.
 
 % ═══════════════════════════════════════════════════════════════════════
 % APPENDIX C: SEEK Route Activation Trace
@@ -556,7 +556,7 @@ $t$ & \textbf{Token} & $\tilde{H}_t$ & $\bar{H}_{\text{EWMA}}$ & $S_t^+$ & \text
 \end{center}
 
 \paragraph{Phase 2: Entropy Escalation ($t{=}13$--$21$).}
-At token 13 (``BASE''), the model encounters the specific experiment name. $\tilde{H}_{13}$ spikes to $2.31$---the model assigns substantial probability mass to competing completions (``Brookhaven'', ``Fermilab'', ``ISOLDE''), revealing genuine epistemic uncertainty about which experiment measured this value. The EWMA crosses the \textsc{Deep} threshold ($\tau_D{=}1.2$) at $t{=}14$, but extended reasoning cannot resolve the uncertainty because the required numerical value is absent from the training corpus:
+At token 13 (``BASE''), the model encounters the specific experiment name. $\tilde{H}_{13}$ spikes to $2.31$ as probability mass spreads across competing completions (``Brookhaven'', ``Fermilab'', ``ISOLDE''). The EWMA crosses the \textsc{Deep} threshold ($\tau_D{=}1.2$) at $t{=}14$, but extended reasoning cannot resolve the uncertainty because the required numerical value is not in the training data:
 
 \begin{center}
 \small
@@ -598,6 +598,6 @@ At $t{=}23$, \metis{} executes the following control-plane sequence:
 \end{enumerate}
 
 \paragraph{Post-Injection Entropy Collapse.}
-After grounding context injection, the mean EWMA entropy collapses from $2.98 \to 0.68$---a \textbf{77\% reduction}---confirming that the retrieved evidence resolved the epistemic gap. The model completes the response in 89 tokens at \textsc{Fast}-level confidence, producing a factually correct answer with the precise measurement value and Standard Model comparison. This entropy collapse is the ground-truth signal that the \textsc{Seek} route succeeded: if the retrieval had returned irrelevant content, the EWMA would remain elevated, and \metis{} would flag the response as unreliable.
+After grounding context injection, the mean EWMA entropy drops from $2.98 \to 0.68$ (a 77\% reduction), confirming that the retrieved evidence resolved the knowledge gap. The model completes the response in 89 tokens at \textsc{Fast}-level confidence, producing a factually correct answer with the precise measurement value and Standard Model comparison. This entropy drop also serves as an implicit verification signal: if the retrieval had returned irrelevant content, the EWMA would remain elevated, and \metis{} could flag the response accordingly.
 
 \end{document}
