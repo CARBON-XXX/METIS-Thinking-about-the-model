@@ -69,11 +69,11 @@
 
 ## Why METIS
 
-现有推理扩展方案的核心矛盾：**简单问题浪费算力，复杂问题算力不足。**
+The core tension in inference scaling: **simple queries waste compute, complex queries starve for it.**
 
-Chain-of-Thought 对所有 query 强制推理。Self-Consistency 再乘以 *k* 倍。Semantic Entropy 需要 *K* 次完整生成 + O(K²) NLI。没有一个方案在生成的**同时**做决策。
+Chain-of-Thought forces deliberation on every query. Self-Consistency multiplies that cost by *k*. Semantic Entropy requires *K* full generations + O(K²) NLI scoring. None of these make routing decisions **during** generation.
 
-METIS 在 decode 的**每一个 token** 上提取 Shannon 熵，经 EWMA 滤波 + CUSUM 变点检测，在 **1.3 μs** 内（p50）完成路由——不打断生成流水线，不额外调用模型，不增加端到端延迟。
+METIS extracts Shannon entropy from **every decoded token**, applies EWMA filtering + CUSUM change-point detection, and completes a routing decision in **1.3 μs** (p50) — without interrupting the generation pipeline, without extra model calls, without adding end-to-end latency.
 
 ---
 
@@ -88,7 +88,7 @@ METIS 在 decode 的**每一个 token** 上提取 Shannon 熵，经 EWMA 滤波 
 | Self-Consistency *k*=5 | 94.0% | 864.5 | 1.0× |
 | **METIS Dynamic** | **96.0%** | **53.4** | **16.2×** |
 
-> 100-question mixed benchmark (50 GSM8K + 50 factual QA). METIS 路由 48 请求走 FAST (≤30 tok), 52 请求走 NORMAL/DEEP (50–149 tok).
+> 100-question mixed benchmark (50 GSM8K + 50 factual QA). METIS routes 48 requests via FAST (≤30 tok), 52 via NORMAL/DEEP (50–149 tok).
 
 ### Routing Decision Latency
 
@@ -108,33 +108,33 @@ METIS 在 decode 的**每一个 token** 上提取 Shannon 熵，经 EWMA 滤波 
 | **8** | **5,372 ms** | **1,962 ms** | **2.7×** |
 | 16 | 2,232 ms | 2,082 ms | 1.1× |
 
-> QPS=8 时 Vanilla 因 KV-cache 饱和出现 P99 尾部暴涨。METIS 提前释放 FAST 路径的 PagedAttention blocks，将尾部延迟压缩 2.7×。
+> At QPS=8, Vanilla suffers a P99 tail spike from KV-cache saturation. METIS releases FAST-path PagedAttention blocks early, compressing tail latency by 2.7×.
 
-### Bimodal Distribution (非截断证明)
+### Bimodal Distribution (Non-Truncation Proof)
 
 | Test | Statistic | Threshold | Verdict |
 |:---|:---:|:---:|:---:|
 | ΔBIC (Kass & Raftery) | 40.6 | >10 | **Bimodal** |
 | Bimodality Coefficient | 0.754 | >0.555 | **Bimodal** |
 
-> GMM 拟合：Peak 1 (FAST) μ₁=22.8 tok, σ₁=23.5, w₁=0.69 · Peak 2 (DEEP) μ₂=116.5 tok, σ₂=13.6, w₂=0.31
+> GMM fit: Peak 1 (FAST) μ₁=22.8 tok, σ₁=23.5, w₁=0.69 · Peak 2 (DEEP) μ₂=116.5 tok, σ₂=13.6, w₂=0.31
 
 ---
 
 ## The O(1) Pipeline
 
-METIS 的核心信号链全部运行在 **O(1) 摊还时间**：
+The entire signal chain runs in **O(1) amortized time** per token:
 
 ```
-Token logits ──▶ Shannon entropy H(t)              O(|V|), 单次 softmax
-           ──▶ EWMA H̄(t) = αH(t) + (1-α)H̄(t-1)  O(1), 一次乘加
-           ──▶ CUSUM S⁺(t) = max(0, S⁺ + H̄ - μ₀ - δ)  O(1), 一次比较
-           ──▶ Route decision                       O(1), 阈值判定
+Token logits ──▶ Shannon entropy H(t)              O(|V|), single softmax
+           ──▶ EWMA H̄(t) = αH(t) + (1-α)H̄(t-1)  O(1), one multiply-add
+           ──▶ CUSUM S⁺(t) = max(0, S⁺ + H̄ - μ₀ - δ)  O(1), one comparison
+           ──▶ Route decision                       O(1), threshold check
 ```
 
-统计窗口使用 **Welford 在线算法**（mean/variance）+ **周期性 O(N) 重校准**（skew/kurtosis，每 100 步一次），避免浮点漂移的同时保持每步 O(1)。
+The statistics window uses **Welford's online algorithm** (mean/variance) with **periodic O(N) recalibration** (skew/kurtosis, every 100 steps), preventing floating-point drift while keeping per-step cost at O(1).
 
-整条链路编译为 Rust dylib，通过 PyO3 FFI 暴露，**零 Python 解释器开销**。
+The full chain compiles to a Rust dylib exposed via PyO3 FFI — **zero Python interpreter overhead**.
 
 ---
 
@@ -221,7 +221,7 @@ benchmarks/                  Evaluation harness
 
 ## Cross-Model Scaling
 
-METIS 的 CUSUM 检测器基于**熵漂移率**（一阶导）而非绝对熵值，因此天然适配不同规模的模型：
+The CUSUM detector operates on the **entropy drift rate** (first derivative) rather than absolute entropy values, making it inherently model-agnostic:
 
 | Scale | Category | Mean H̄ | FAST% | DEEP% |
 |:---|:---|:---:|:---:|:---:|
@@ -230,17 +230,17 @@ METIS 的 CUSUM 检测器基于**熵漂移率**（一阶导）而非绝对熵值
 | 32B | Simple | 0.39 | 100% | 0% |
 | 32B | Complex | 0.31 | 100% | 0% |
 
-> 32B 模型的基线熵大幅下降（epistemic sharpening），所有复杂任务也变成低熵直答。部署时需按模型规模重校准阈值 τ_F / τ_D。
+> The 32B model exhibits sharply lower baseline entropy (epistemic sharpening) — all complex tasks become low-entropy direct answers. Deploying on larger models requires recalibrating thresholds τ_F / τ_D to the model's entropy floor.
 
 ---
 
 ## SEEK Route: When Compute Is Not Enough
 
-当 DEEP 路由后 H̄ 仍超过 τ_crit = 2.8（模型缺少回答所需的事实知识），METIS 中断生成并触发外部检索：
+When H̄ remains above τ_crit = 2.8 after DEEP routing (the model lacks the factual knowledge to answer), METIS halts generation and triggers external retrieval:
 
 ```
-t=0─12   Normal decode      H̄ < 1.0    ───────────────▶  继续
-t=13     "BASE" (实验名)     H̄ = 1.42   ───────────────▶  继续
+t=0─12   Normal decode      H̄ < 1.0    ───────────────▶  continue
+t=13     "BASE" (experiment) H̄ = 1.42   ───────────────▶  continue
 t=19     "measured"          H̄ = 2.04   ───────────────▶  → DEEP
 t=22     "approximately"     H̄ = 2.98   ▶ τ_crit breach ▶  → SEEK
 t=23     [HALT] CUSUM S⁺ = 2.18 > τ = 2.0
